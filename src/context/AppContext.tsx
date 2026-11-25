@@ -89,7 +89,9 @@ interface AppContextType {
   addUser: (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => void;
   updateUser: (
     userId: string,
-    updates: Partial<Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active'>>
+    updates: Partial<
+      Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active' | 'password' | 'isFirstLogin'>
+    >
   ) => void;
   toggleUserStatus: (userId: string) => void;
 
@@ -179,13 +181,63 @@ const LEGACY_DEMO_REQUEST_IDS = new Set([
   'req-010',
 ]);
 
+const LEGACY_DEMO_CADASTRO_CNPJS = new Set([
+  '24.680.135/0001-40',
+  '38.912.456/0001-05',
+  '45.123.987/0001-88',
+]);
+
+const LEGACY_DEMO_CADASTRO_NAMES = new Set([
+  'Marcos Vinícius Oliveira',
+  'Juliana Costa Ferreira',
+  'Rafael Almeida Souza',
+]);
+
+const LEGACY_DEMO_AUTHOR_NAMES = new Set([
+  'Paulo Notas',
+  'Roberto Gerente',
+  'Carlos Silva',
+  'Fernanda Ameta',
+]);
+
+const isLegacyDemoCadastro = (c: CadastroPrestador): boolean =>
+  /^cad-0*\d{1,3}$/.test(c.id) ||
+  LEGACY_DEMO_CADASTRO_CNPJS.has(c.cnpj) ||
+  LEGACY_DEMO_CADASTRO_NAMES.has(c.nome);
+
+const isLegacyDemoNota = (n: NotaFiscalEquipe): boolean =>
+  /^nota-(eq-)?0*\d{1,3}$/.test(n.id) ||
+  /^cad-0*\d{1,3}$/.test(n.prestadorId) ||
+  LEGACY_DEMO_CADASTRO_CNPJS.has(n.prestadorCnpj) ||
+  LEGACY_DEMO_CADASTRO_NAMES.has(n.prestadorNome) ||
+  LEGACY_DEMO_AUTHOR_NAMES.has(n.criadoPorNome);
+
+const isLegacyDemoComprovante = (comp: ComprovanteServico): boolean =>
+  /^comp-0*\d{1,3}$/.test(comp.id) ||
+  /^nota-(eq-)?0*\d{1,3}$/.test(comp.notaId) ||
+  /^cad-0*\d{1,3}$/.test(comp.prestadorId) ||
+  LEGACY_DEMO_AUTHOR_NAMES.has(comp.criadoPorNome);
+
+const isLegacyDemoAuditoria = (a: AuditoriaEntry): boolean =>
+  /^aud-0*\d{1,3}$/.test(a.id) ||
+  LEGACY_DEMO_USER_IDS.has(a.autorUid) ||
+  LEGACY_DEMO_AUTHOR_NAMES.has(a.autorNome) ||
+  /^cad-0*\d{1,3}$/.test(a.entidadeId) ||
+  /^nota-(eq-)?0*\d{1,3}$/.test(a.entidadeId) ||
+  /^comp-0*\d{1,3}$/.test(a.entidadeId);
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [users, setUsers] = useState<User[]>(() => {
     const saved = localStorage.getItem('ameta_users');
     if (!saved) return INITIAL_USERS;
     const parsed: User[] = JSON.parse(saved);
     const cleaned = parsed.filter((u) => !LEGACY_DEMO_USER_IDS.has(u.id));
-    return cleaned.length > 0 ? cleaned : INITIAL_USERS;
+    if (cleaned.length === 0) return INITIAL_USERS;
+    const existingEmails = new Set(cleaned.map((u) => u.email.toLowerCase()));
+    const missingInitial = INITIAL_USERS.filter(
+      (u) => !existingEmails.has(u.email.toLowerCase())
+    );
+    return missingInitial.length > 0 ? [...cleaned, ...missingInitial] : cleaned;
   });
 
   const [requests, setRequests] = useState<AdvanceRequest[]>(() => {
@@ -197,22 +249,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [cadastros, setCadastros] = useState<CadastroPrestador[]>(() => {
     const saved = localStorage.getItem('ameta_cadastros');
-    return saved ? JSON.parse(saved) : INITIAL_CADASTROS;
+    if (!saved) return INITIAL_CADASTROS;
+    const parsed: CadastroPrestador[] = JSON.parse(saved);
+    return parsed.filter((c) => !isLegacyDemoCadastro(c));
   });
 
   const [notasEquipe, setNotasEquipe] = useState<NotaFiscalEquipe[]>(() => {
     const saved = localStorage.getItem('ameta_notas_equipe');
-    return saved ? JSON.parse(saved) : INITIAL_NOTAS_EQUIPE;
+    if (!saved) return INITIAL_NOTAS_EQUIPE;
+    const parsed: NotaFiscalEquipe[] = JSON.parse(saved);
+    return parsed.filter((n) => !isLegacyDemoNota(n));
   });
 
   const [comprovantes, setComprovantes] = useState<ComprovanteServico[]>(() => {
     const saved = localStorage.getItem('ameta_comprovantes');
-    return saved ? JSON.parse(saved) : INITIAL_COMPROVANTES;
+    if (!saved) return INITIAL_COMPROVANTES;
+    const parsed: ComprovanteServico[] = JSON.parse(saved);
+    return parsed.filter((comp) => !isLegacyDemoComprovante(comp));
   });
 
   const [auditoria, setAuditoria] = useState<AuditoriaEntry[]>(() => {
     const saved = localStorage.getItem('ameta_auditoria');
-    return saved ? JSON.parse(saved) : INITIAL_AUDITORIA;
+    if (!saved) return INITIAL_AUDITORIA;
+    const parsed: AuditoriaEntry[] = JSON.parse(saved);
+    return parsed.filter((a) => !isLegacyDemoAuditoria(a));
   });
 
   const [currentUserId, setCurrentUserId] = useState<string | null>(() => {
@@ -819,14 +879,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // ==================== USER MANAGEMENT ====================
   const addUser = (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => {
+    const customPass = userData.password?.trim();
     const newUser: User = {
       ...userData,
       id: 'user-' + Date.now(),
       createdAt: new Date().toISOString().substring(0, 10),
       active: true,
       ativo: true,
-      password: 'ameta123',
-      isFirstLogin: true,
+      password: customPass || 'ameta123',
+      isFirstLogin: !customPass,
     };
     setUsers((prev) => [...prev, newUser]);
     if (firebaseAuthenticated) {
@@ -834,20 +895,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     addNotification(
       'Usuário Cadastrado',
-      `Novo usuário ${newUser.name} cadastrado com senha padrão 'ameta123'.`
+      customPass
+        ? `Novo usuário ${newUser.name} cadastrado com senha personalizada.`
+        : `Novo usuário ${newUser.name} cadastrado com senha padrão 'ameta123'.`
     );
   };
 
   const updateUser = (
     userId: string,
-    updates: Partial<Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active'>>
+    updates: Partial<
+      Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active' | 'password' | 'isFirstLogin'>
+    >
   ) => {
     setUsers((prev) =>
       prev.map((u) => {
         if (u.id !== userId) return u;
+        const cleanUpdates = { ...updates };
+        if (cleanUpdates.password !== undefined && !cleanUpdates.password.trim()) {
+          delete cleanUpdates.password;
+        }
         const updated: User = {
           ...u,
-          ...updates,
+          ...cleanUpdates,
           ativo: updates.active !== undefined ? updates.active : u.active,
         };
         if (firebaseAuthenticated) {

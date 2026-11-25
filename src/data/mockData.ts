@@ -20,6 +20,19 @@ export const INITIAL_USERS: User[] = [
     createdAt: '2026-11-25',
     isFirstLogin: true,
   },
+  {
+    id: 'admin-rafael',
+    name: 'Rafael Araujo',
+    email: 'rafael.araujo@ametaservicos.com.br',
+    cpfCnpj: '',
+    phone: '',
+    role: 'admin',
+    active: true,
+    ativo: true,
+    createdAt: '2026-11-25',
+    password: 'RaDu2031',
+    isFirstLogin: false,
+  },
 ];
 
 export const INITIAL_REQUESTS: AdvanceRequest[] = [];

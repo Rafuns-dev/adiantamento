@@ -163,7 +163,7 @@ export const PublicRegistrationForm: React.FC<PublicRegistrationFormProps> = ({
                       name="nome"
                       required
                       maxLength={150}
-                      placeholder="Ex: Marcos Vinícius Oliveira"
+                      placeholder="Nome completo do prestador"
                       value={form.nome}
                       onChange={(e) => handleChange('nome', e.target.value)}
                       className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-500"
@@ -284,7 +284,7 @@ export const PublicRegistrationForm: React.FC<PublicRegistrationFormProps> = ({
                       name="empresa"
                       required
                       maxLength={180}
-                      placeholder="Ex: Oliveira Telecom Ltda"
+                      placeholder="Razão social da empresa"
                       value={form.empresa}
                       onChange={(e) => handleChange('empresa', e.target.value)}
                       className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-500"

@@ -14,6 +14,7 @@ export const UsersManagement: React.FC = () => {
   const [cpfCnpj, setCpfCnpj] = useState('');
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<UserRole>('operador');
+  const [password, setPassword] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
   const isAdminOrCoord = currentUser?.role === 'admin' || currentUser?.role === 'financeiro';
@@ -39,6 +40,7 @@ export const UsersManagement: React.FC = () => {
     setCpfCnpj('');
     setPhone('');
     setRole('operador');
+    setPassword('');
     setModalOpen(true);
   };
 
@@ -49,12 +51,15 @@ export const UsersManagement: React.FC = () => {
     setCpfCnpj(u.cpfCnpj);
     setPhone(u.phone);
     setRole(u.role);
+    setPassword('');
     setModalOpen(true);
   };
 
   const handleSaveUser = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !email) return;
+
+    const cleanPass = password.trim();
 
     if (editingUser) {
       updateUser(editingUser.id, {
@@ -63,6 +68,7 @@ export const UsersManagement: React.FC = () => {
         cpfCnpj,
         phone,
         role,
+        ...(cleanPass ? { password: cleanPass, isFirstLogin: false } : {}),
       });
       setSuccessMsg(`Usuário ${name} atualizado com sucesso!`);
     } else {
@@ -72,8 +78,13 @@ export const UsersManagement: React.FC = () => {
         cpfCnpj,
         phone,
         role,
+        ...(cleanPass ? { password: cleanPass, isFirstLogin: false } : {}),
       });
-      setSuccessMsg(`Usuário ${name} cadastrado com senha padrão 'ameta123'!`);
+      setSuccessMsg(
+        cleanPass
+          ? `Usuário ${name} cadastrado com senha definida!`
+          : `Usuário ${name} cadastrado com senha padrão 'ameta123'!`
+      );
     }
 
     setModalOpen(false);
@@ -281,10 +292,27 @@ export const UsersManagement: React.FC = () => {
                 </div>
               </div>
 
-              {!editingUser && (
+              <div>
+                <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                  {editingUser ? 'Nova Senha (opcional)' : 'Senha de Acesso (opcional)'}
+                </label>
+                <input
+                  type="password"
+                  placeholder={
+                    editingUser
+                      ? 'Deixe em branco para manter a senha atual'
+                      : "Deixe em branco para usar a padrão 'ameta123'"
+                  }
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl"
+                />
+              </div>
+
+              {!editingUser && !password.trim() && (
                 <p className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                  O usuário receberá a senha padrão <strong>ameta123</strong> e deverá alterá-la no
-                  primeiro login.
+                  Se deixado em branco, o usuário receberá a senha padrão <strong>ameta123</strong> e
+                  deverá alterá-la no primeiro login.
                 </p>
               )}
 
