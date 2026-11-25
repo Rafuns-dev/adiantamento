@@ -1,0 +1,87 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Bloqueio global por padrão (sem acesso anônimo)
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function temPerfil() {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/usuarios/$(request.auth.uid));
+    }
+
+    function perfil() {
+      return firestore.get(/databases/(default)/documents/usuarios/$(request.auth.uid)).data;
+    }
+
+    function ativo() {
+      return temPerfil() && perfil().ativo == true;
+    }
+
+    function eAdmin() {
+      return (ativo() && perfil().role in ['admin', 'financeiro']) ||
+        (isSignedIn() && request.auth.token.email == 'blabluki@gmail.com' && request.auth.token.email_verified == true);
+    }
+
+    function eNota() {
+      return ativo() && perfil().role == 'vistoria_nota';
+    }
+
+    function eComp() {
+      return ativo() && perfil().role == 'vistoria_ameta';
+    }
+
+    function interno() {
+      return eAdmin() || eNota() || eComp();
+    }
+
+    function tamanhoValido() {
+      return request.resource != null &&
+        request.resource.size > 0 &&
+        request.resource.size <= 10 * 1024 * 1024; // Máximo 10 MB
+    }
+
+    function tipoNotaValido() {
+      return request.resource.contentType in [
+        'application/pdf',
+        'application/xml',
+        'text/xml'
+      ];
+    }
+
+    function tipoComprovanteValido() {
+      return request.resource.contentType in [
+        'application/pdf',
+        'image/jpeg',
+        'image/png'
+      ];
+    }
+
+    // Notas Fiscais: notas/{notaId}/{arquivo}
+    // Leitura: qualquer usuário ativo do painel (interno)
+    // Envio: apenas vistoria_nota e admin (PDF ou XML até 10 MB)
+    // Sem sobrescrever (update bloqueado) e sem apagar, exceto admin
+    match /notas/{notaId}/{fileName} {
+      allow read: if interno();
+      allow create: if (eNota() || eAdmin()) && tamanhoValido() && tipoNotaValido();
+      allow update: if false;
+      allow delete: if eAdmin();
+    }
+
+    // Comprovantes: comprovantes/{notaId}/{arquivo}
+    // Leitura: qualquer usuário ativo do painel (interno)
+    // Envio: apenas vistoria_ameta e admin (PDF, JPG ou PNG até 10 MB)
+    // Sem sobrescrever (update bloqueado) e sem apagar, exceto admin
+    match /comprovantes/{notaId}/{fileName} {
+      allow read: if interno();
+      allow create: if (eComp() || eAdmin()) && tamanhoValido() && tipoComprovanteValido();
+      allow update: if false;
+      allow delete: if eAdmin();
+    }
+  }
+}

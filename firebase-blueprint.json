@@ -1,0 +1,156 @@
+{
+  "entities": {
+    "Usuario": {
+      "title": "Usuário do Painel AMETA",
+      "description": "Perfil e controle de acesso RBAC dos usuários internos e operadores.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "email": { "type": "string", "format": "email", "maxLength": 180 },
+        "cpfCnpj": { "type": "string", "maxLength": 30 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "operador", "financeiro", "vistoria_nota", "vistoria_ameta"]
+        },
+        "ativo": { "type": "boolean" },
+        "isFirstLogin": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["uid", "name", "email", "role", "ativo"]
+    },
+    "CadastroPrestador": {
+      "title": "Cadastro Público de Prestador (16 campos)",
+      "description": "Cadastro enviado pelo prestador no formulário público com exatamente 16 campos.",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "cpf": { "type": "string", "minLength": 11, "maxLength": 20 },
+        "rg": { "type": "string", "minLength": 4, "maxLength": 30 },
+        "dataNascimento": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "filiacaoMae": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "filiacaoPai": { "type": "string", "maxLength": 150 },
+        "funcao": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "empresa": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "cnpj": { "type": "string", "minLength": 14, "maxLength": 25 },
+        "telefone": { "type": "string", "minLength": 8, "maxLength": 30 },
+        "email": { "type": "string", "format": "email", "maxLength": 180 },
+        "cep": { "type": "string", "minLength": 8, "maxLength": 15 },
+        "endereco": { "type": "string", "minLength": 4, "maxLength": 250 },
+        "cidadeUf": { "type": "string", "minLength": 3, "maxLength": 100 },
+        "dadosBancarios": { "type": "string", "minLength": 4, "maxLength": 200 },
+        "chavePix": { "type": "string", "minLength": 3, "maxLength": 150 },
+        "status": {
+          "type": "string",
+          "enum": ["Pendente", "Em andamento", "Concluído"]
+        },
+        "criadoEm": { "type": "string", "format": "date-time" },
+        "concluidoEm": { "type": "string", "format": "date-time" },
+        "concluidoPorUid": { "type": "string", "maxLength": 128 },
+        "concluidoPorNome": { "type": "string", "maxLength": 150 }
+      },
+      "required": [
+        "nome", "cpf", "rg", "dataNascimento", "filiacaoMae", "filiacaoPai",
+        "funcao", "empresa", "cnpj", "telefone", "email", "cep",
+        "endereco", "cidadeUf", "dadosBancarios", "chavePix", "status", "criadoEm"
+      ]
+    },
+    "NotaFiscalEquipe": {
+      "title": "Nota Fiscal Emitida Antes do Serviço",
+      "description": "Nota fiscal registrada pela Equipe de Vistoria - Notas antes da execução do serviço.",
+      "type": "object",
+      "properties": {
+        "prestadorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "prestadorNome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "prestadorCnpj": { "type": "string", "minLength": 14, "maxLength": 25 },
+        "prestadorEmpresa": { "type": "string", "maxLength": 180 },
+        "prestadorFuncao": { "type": "string", "maxLength": 120 },
+        "numero": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "dataEmissao": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "valor": { "type": "number" },
+        "descricao": { "type": "string", "minLength": 3, "maxLength": 1000 },
+        "observacoes": { "type": "string", "maxLength": 1000 },
+        "arquivoPath": { "type": "string", "maxLength": 500 },
+        "arquivoNome": { "type": "string", "maxLength": 250 },
+        "status": {
+          "type": "string",
+          "enum": ["Emitida", "Aguardando comprovante", "Comprovada"]
+        },
+        "criadoPorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "criadoPorNome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "criadoEm": { "type": "string", "format": "date-time" },
+        "atualizadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "prestadorId", "prestadorNome", "prestadorCnpj", "numero", "dataEmissao",
+        "valor", "descricao", "status", "criadoPorUid", "criadoPorNome", "criadoEm", "atualizadoEm"
+      ]
+    },
+    "ComprovanteServico": {
+      "title": "Comprovante de Serviço",
+      "description": "Comprovante anexado pela Equipe Vistoria Ameta vinculado a uma nota existente.",
+      "type": "object",
+      "properties": {
+        "notaId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "prestadorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "categoria": {
+          "type": "string",
+          "enum": ["Hospedagem", "Combustível", "Alimentação", "Almoço", "Pedágios", "Estacionamento", "Outras despesas"]
+        },
+        "valor": { "type": "number" },
+        "descricao": { "type": "string", "minLength": 2, "maxLength": 500 },
+        "data": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "arquivoPath": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "arquivoNome": { "type": "string", "maxLength": 250 },
+        "tipo": { "type": "string", "enum": ["application/pdf", "image/jpeg", "image/png"] },
+        "tamanho": { "type": "number" },
+        "criadoPorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "criadoPorNome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "criadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "notaId", "prestadorId", "descricao", "data", "arquivoPath",
+        "tipo", "tamanho", "criadoPorUid", "criadoPorNome", "criadoEm"
+      ]
+    },
+    "Auditoria": {
+      "title": "Log de Auditoria",
+      "description": "Registro imutável de criação/edição de notas, envio de comprovantes, downloads e conclusões.",
+      "type": "object",
+      "properties": {
+        "acao": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "entidade": { "type": "string", "enum": ["cadastro", "nota", "comprovante", "usuario", "solicitacao"] },
+        "entidadeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "detalhes": { "type": "string", "maxLength": 1000 },
+        "autorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "autorNome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "autorRole": { "type": "string", "maxLength": 50 },
+        "criadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": ["acao", "entidade", "entidadeId", "autorUid", "autorNome", "autorRole", "criadoEm"]
+    }
+  },
+  "firestore": {
+    "/usuarios/{uid}": {
+      "schema": { "$ref": "#/entities/Usuario" },
+      "description": "Perfis de acesso e papéis dos usuários do painel AMETA."
+    },
+    "/cadastros/{cadastroId}": {
+      "schema": { "$ref": "#/entities/CadastroPrestador" },
+      "description": "Cadastros de prestadores enviados pelo formulário público (16 campos)."
+    },
+    "/notas/{notaId}": {
+      "schema": { "$ref": "#/entities/NotaFiscalEquipe" },
+      "description": "Notas fiscais emitidas pela Equipe de Vistoria - Notas antes do serviço."
+    },
+    "/comprovantes/{comprovanteId}": {
+      "schema": { "$ref": "#/entities/ComprovanteServico" },
+      "description": "Comprovantes anexados pela Equipe Vistoria Ameta vinculados às notas."
+    },
+    "/auditoria/{auditoriaId}": {
+      "schema": { "$ref": "#/entities/Auditoria" },
+      "description": "Registro de auditoria de ações e downloads."
+    }
+  }
+}
