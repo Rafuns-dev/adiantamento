@@ -7,8 +7,9 @@ export const ChangePasswordModal: React.FC = () => {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     if (newPassword.length < 6) {
@@ -19,7 +20,13 @@ export const ChangePasswordModal: React.FC = () => {
       setError('As senhas não coincidem.');
       return;
     }
-    changePassword(newPassword);
+    setSubmitting(true);
+    try {
+      await changePassword(newPassword);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Não foi possível alterar a senha.');
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -72,9 +79,10 @@ export const ChangePasswordModal: React.FC = () => {
 
           <button
             type="submit"
-            className="w-full py-3.5 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-xl text-sm shadow-lg shadow-teal-950/50 transition-all mt-4"
+            disabled={submitting}
+            className="w-full py-3.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-60 text-white font-bold rounded-xl text-sm shadow-lg shadow-teal-950/50 transition-all mt-4"
           >
-            Salvar Nova Senha e Entrar
+            {submitting ? 'Salvando...' : 'Salvar Nova Senha e Entrar'}
           </button>
         </form>
       </div>

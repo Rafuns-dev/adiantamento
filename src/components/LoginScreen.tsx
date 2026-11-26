@@ -3,19 +3,36 @@ import { useApp } from '../context/AppContext';
 import { Lock, Mail, ArrowRight } from 'lucide-react';
 
 export const LoginScreen: React.FC = () => {
-  const { login } = useApp();
+  const { login, loginWithGoogle, syncError, dismissSyncError } = useApp();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    const success = login(email, password);
-    if (!success) {
-      setError('E-mail ou senha inválidos, ou conta desativada.');
+    dismissSyncError();
+    setSubmitting(true);
+    const result = await login(email, password);
+    setSubmitting(false);
+    if (!result.ok) {
+      setError(result.error || 'E-mail ou senha inválidos, ou conta desativada.');
     }
   };
+
+  const handleGoogle = async () => {
+    setError('');
+    dismissSyncError();
+    setSubmitting(true);
+    const result = await loginWithGoogle();
+    setSubmitting(false);
+    if (!result.ok) {
+      setError(result.error || 'Falha ao entrar com o Google.');
+    }
+  };
+
+  const message = error || syncError;
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center p-4 relative overflow-hidden font-sans">
@@ -39,9 +56,9 @@ export const LoginScreen: React.FC = () => {
           </p>
         </div>
 
-        {error && (
+        {message && (
           <div className="bg-red-500/10 border border-red-500/30 text-red-400 p-3.5 rounded-2xl text-xs text-center font-semibold">
-            {error}
+            {message}
           </div>
         )}
 
@@ -87,12 +104,28 @@ export const LoginScreen: React.FC = () => {
 
           <button
             type="submit"
-            className="w-full py-3.5 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-2xl text-sm shadow-xl shadow-teal-950/50 transition-all flex items-center justify-center gap-2"
+            disabled={submitting}
+            className="w-full py-3.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-60 text-white font-bold rounded-2xl text-sm shadow-xl shadow-teal-950/50 transition-all flex items-center justify-center gap-2"
           >
-            <span>Entrar no Sistema</span>
+            <span>{submitting ? 'Entrando...' : 'Entrar no Sistema'}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>
+
+        <div className="flex items-center gap-3 text-[11px] text-slate-500">
+          <div className="flex-1 h-px bg-slate-800" />
+          <span>ou</span>
+          <div className="flex-1 h-px bg-slate-800" />
+        </div>
+
+        <button
+          type="button"
+          onClick={handleGoogle}
+          disabled={submitting}
+          className="w-full py-3 bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-900 font-bold rounded-2xl text-sm transition-all"
+        >
+          Entrar com Google
+        </button>
       </div>
     </div>
   );

@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, FileText, Download, ExternalLink, CheckCircle2, Image as ImageIcon, FileCode2 } from 'lucide-react';
 import { dataUrlToBlob, decodeTextFromDataUrl, downloadFile } from '../utils/fileHelpers';
+import { useApp } from '../context/AppContext';
+import { STORAGE_REF_PREFIX } from '../services/firebaseService';
 
 interface SecondaryAttachment {
   label: string;
@@ -29,8 +31,36 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'primary' | 'secondary'>('primary');
 
+  const { resolveAuthenticatedStorageUrl } = useApp();
+
   const currentFileName = activeTab === 'secondary' && secondaryAttachment ? secondaryAttachment.fileName : fileName;
-  const currentFileData = activeTab === 'secondary' && secondaryAttachment ? secondaryAttachment.fileData : fileData;
+  const rawFileData = activeTab === 'secondary' && secondaryAttachment ? secondaryAttachment.fileData : fileData;
+
+  // Anexos de solicitações ficam no Firebase Storage e são guardados como "storage:<caminho>".
+  const isStorageRef = !!rawFileData && rawFileData.startsWith(STORAGE_REF_PREFIX);
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
+  const [resolveFailed, setResolveFailed] = useState(false);
+  const [remoteXmlText, setRemoteXmlText] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResolvedUrl(null);
+    setResolveFailed(false);
+    setRemoteXmlText(null);
+    if (rawFileData && rawFileData.startsWith(STORAGE_REF_PREFIX)) {
+      resolveAuthenticatedStorageUrl(rawFileData.slice(STORAGE_REF_PREFIX.length)).then((url) => {
+        if (cancelled) return;
+        if (url) setResolvedUrl(url);
+        else setResolveFailed(true);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawFileData]);
+
+  const currentFileData = isStorageRef ? resolvedUrl ?? undefined : rawFileData;
 
   const detectedType = useMemo<'pdf' | 'xml' | 'image' | 'generic'>(() => {
     if (activeTab === 'primary' && fileType) return fileType;
@@ -70,12 +100,33 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     };
   }, [blobUrl]);
 
+  useEffect(() => {
+    if (detectedType !== 'xml' || !isStorageRef || !resolvedUrl) return;
+    let cancelled = false;
+    fetch(resolvedUrl)
+      .then((r) => r.text())
+      .then((text) => {
+        if (!cancelled) setRemoteXmlText(text);
+      })
+      .catch(() => {
+        // sem acesso ao conteúdo (CORS): o botão de baixar continua funcionando
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detectedType, isStorageRef, resolvedUrl]);
+
   const xmlText = useMemo(() => {
     if (detectedType !== 'xml' || !currentFileData) return null;
-    return decodeTextFromDataUrl(currentFileData);
-  }, [detectedType, currentFileData]);
+    if (currentFileData.startsWith('data:')) return decodeTextFromDataUrl(currentFileData);
+    return remoteXmlText;
+  }, [detectedType, currentFileData, remoteXmlText]);
 
   const handleDownload = () => {
+    if (isStorageRef) {
+      if (resolvedUrl) window.open(resolvedUrl, '_blank', 'noopener');
+      return;
+    }
     const detailsText = details.map(d => `${d.label}: ${d.value}`).join('\n');
     downloadFile(
       currentFileName,
@@ -154,7 +205,13 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
           )}
 
           {/* Real File Preview */}
-          {currentFileData ? (
+          {isStorageRef && !currentFileData ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-100 p-10 text-center text-xs text-slate-600">
+              {resolveFailed
+                ? 'Não foi possível abrir este arquivo no Firebase Storage (verifique as permissões e tente novamente).'
+                : 'Carregando arquivo...'}
+            </div>
+          ) : currentFileData ? (
             <div className="rounded-2xl border border-slate-200 bg-slate-100 p-3 flex flex-col items-center justify-center">
               {detectedType === 'image' && (
                 <img
