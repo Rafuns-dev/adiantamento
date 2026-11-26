@@ -5,8 +5,7 @@ import {
   updateDoc,
   deleteDoc,
   getDoc,
-  getDocs,
-  onSnapshot,
+    onSnapshot,
   query,
   orderBy,
   serverTimestamp,
@@ -15,6 +14,7 @@ import {
 import {
   ref,
   uploadBytesResumable,
+  uploadString,
   getDownloadURL,
   deleteObject,
 } from 'firebase/storage';
@@ -27,6 +27,24 @@ import {
   User,
   AdvanceRequest,
 } from '../types';
+
+/**
+ * Remove recursivamente propriedades `undefined` (o Firestore não aceita esse valor).
+ * Objetos que não são "planos" (ex.: FieldValue de serverTimestamp, Date) são preservados.
+ */
+export function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.filter((v) => v !== undefined).map((v) => stripUndefined(v)) as unknown as T;
+  }
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== undefined) out[k] = stripUndefined(v);
+    }
+    return out as T;
+  }
+  return value;
+}
 
 function toIsoString(val: unknown): string {
   if (!val) return new Date().toISOString();
@@ -76,6 +94,78 @@ export async function uploadAuthenticatedFile(
   });
 
   return { arquivoPath, arquivoNome: file.name };
+}
+
+/** Prefixo usado nos campos de arquivo das solicitações para indicar que o arquivo está no Storage. */
+export const STORAGE_REF_PREFIX = 'storage:';
+
+const MIME_EXTENSIONS: Record<string, string> = {
+  'application/pdf': '.pdf',
+  'application/xml': '.xml',
+  'text/xml': '.xml',
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+
+/**
+ * Se `value` for um data URL (base64), envia o arquivo para o Storage e devolve
+ * `storage:<caminho>`. Qualquer outro valor (inclusive um `storage:` já existente) é mantido.
+ * Isso evita estourar o limite de 1 MB por documento do Firestore.
+ */
+async function externalizeDataUrl(
+  requestId: string,
+  value: string | undefined
+): Promise<string | undefined> {
+  if (!value || !value.startsWith('data:')) return value;
+  const mime = value.match(/^data:([^;,]+)/)?.[1] ?? 'application/octet-stream';
+  const ext = MIME_EXTENSIONS[mime] ?? '';
+  const uuid =
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const path = `solicitacoes/${requestId}/${uuid}${ext}`;
+  await uploadString(ref(storage, path), value, 'data_url');
+  return `${STORAGE_REF_PREFIX}${path}`;
+}
+
+/** Envia ao Storage todos os anexos (NF, XML, comprovantes) ainda em base64 de uma solicitação. */
+export async function uploadRequestFiles(req: AdvanceRequest): Promise<AdvanceRequest> {
+  const invoice = req.invoice
+    ? {
+        ...req.invoice,
+        pdfData: await externalizeDataUrl(req.id, req.invoice.pdfData),
+        xmlData: await externalizeDataUrl(req.id, req.invoice.xmlData),
+      }
+    : undefined;
+
+  const payment = req.payment
+    ? { ...req.payment, receiptData: await externalizeDataUrl(req.id, req.payment.receiptData) }
+    : undefined;
+
+  const accountability = req.accountability
+    ? {
+        ...req.accountability,
+        expenses: await Promise.all(
+          req.accountability.expenses.map(async (e) => ({
+            ...e,
+            receiptData: await externalizeDataUrl(req.id, e.receiptData),
+          }))
+        ),
+        refundDetails: req.accountability.refundDetails
+          ? {
+              ...req.accountability.refundDetails,
+              receiptData: await externalizeDataUrl(
+                req.id,
+                req.accountability.refundDetails.receiptData
+              ),
+            }
+          : undefined,
+      }
+    : undefined;
+
+  return { ...req, invoice, payment, accountability };
 }
 
 export async function getAuthenticatedDownloadUrl(arquivoPath: string): Promise<string> {
@@ -176,10 +266,10 @@ export async function atualizarNotaFirestore(
 ): Promise<void> {
   const path = `notas/${id}`;
   try {
-    const payload: Record<string, unknown> = {
+    const payload: Record<string, unknown> = stripUndefined({
       ...updates,
       atualizadoEm: serverTimestamp(),
-    };
+    });
     await updateDoc(doc(db, 'notas', id), payload);
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
@@ -202,8 +292,6 @@ export async function criarComprovanteFirestore(
   const path = `comprovantes/${comp.id}`;
   try {
     const payload: Record<string, unknown> = {
-      notaId: comp.notaId,
-      prestadorId: comp.prestadorId,
       descricao: comp.descricao.slice(0, 500),
       data: comp.data.slice(0, 20),
       arquivoPath: comp.arquivoPath.slice(0, 500),
@@ -213,6 +301,12 @@ export async function criarComprovanteFirestore(
       criadoPorNome: comp.criadoPorNome.slice(0, 150),
       criadoEm: serverTimestamp(),
     };
+    // As regras exigem notaId OU requestId. O vínculo com a solicitação (requestId) também precisa
+    // ser gravado, senão comprovantes de solicitações são recusados pelo Firestore.
+    if (comp.notaId) payload.notaId = comp.notaId;
+    if (comp.requestId) payload.requestId = comp.requestId;
+    if (comp.prestadorId) payload.prestadorId = comp.prestadorId;
+    if (comp.prestadorName) payload.prestadorName = comp.prestadorName.slice(0, 150);
     if (comp.categoria) payload.categoria = comp.categoria;
     if (comp.valor !== undefined && !Number.isNaN(comp.valor)) payload.valor = Number(comp.valor);
     if (comp.arquivoNome) payload.arquivoNome = comp.arquivoNome.slice(0, 250);
@@ -278,6 +372,16 @@ export async function fetchUserProfileFirestore(uid: string): Promise<User | nul
   }
 }
 
+/** Marca o primeiro acesso como concluído (único campo que o próprio usuário pode alterar). */
+export async function markFirstLoginDoneFirestore(uid: string): Promise<void> {
+  const path = `usuarios/${uid}`;
+  try {
+    await updateDoc(doc(db, 'usuarios', uid), { isFirstLogin: false });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
 export async function upsertUserFirestore(user: User): Promise<void> {
   const path = `usuarios/${user.id}`;
   try {
@@ -300,105 +404,62 @@ export async function upsertUserFirestore(user: User): Promise<void> {
 export async function upsertRequestFirestore(req: AdvanceRequest): Promise<void> {
   const path = `solicitacoes/${req.id}`;
   try {
-    await setDoc(doc(db, 'solicitacoes', req.id), {
-      ...req,
-    });
+    // `stripUndefined` garante que campos opcionais vazios não façam o Firestore recusar o documento.
+    await setDoc(doc(db, 'solicitacoes', req.id), stripUndefined({ ...req }));
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
   }
 }
 
-export function subscribeTeamCollections(callbacks: {
+export interface SubscribeCallbacks {
+  role: User['role'];
   onCadastros: (items: CadastroPrestador[]) => void;
   onNotas: (items: NotaFiscalEquipe[]) => void;
   onComprovantes: (items: ComprovanteServico[]) => void;
   onAuditoria: (items: AuditoriaEntry[]) => void;
-  onRequests?: (items: AdvanceRequest[]) => void;
-  onUsers?: (items: User[]) => void;
-  isAdmin: boolean;
-}): () => void {
+  onRequests: (items: AdvanceRequest[]) => void;
+  onUsers: (items: User[]) => void;
+  /** Chamado quando uma leitura em tempo real falha (ex.: regra de segurança negou o acesso). */
+  onError: (collectionName: string, error: unknown) => void;
+}
+
+/**
+ * Abre as escutas em tempo real do Firestore conforme o perfil do usuário logado.
+ * Cada perfil só assina as coleções que as regras (firestore.rules) permitem ler;
+ * assinar uma coleção proibida geraria erro de permissão.
+ */
+export function subscribeTeamCollections(callbacks: SubscribeCallbacks): () => void {
   const unsubs: Array<() => void> = [];
+  const isAdmin = callbacks.role === 'admin' || callbacks.role === 'financeiro';
+  const canReadTeamCollections =
+    isAdmin || callbacks.role === 'vistoria_nota' || callbacks.role === 'vistoria_ameta';
 
-  if (callbacks.onRequests) {
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'solicitacoes'), orderBy('createdAt', 'desc')),
-        (snap) => {
-          callbacks.onRequests?.(
-            snap.docs.map((d) => {
-              const data = d.data();
-              return {
-                ...(data as Omit<AdvanceRequest, 'id' | 'createdAt'>),
-                id: d.id,
-                createdAt: toIsoString(data.createdAt),
-              };
-            })
-          );
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'solicitacoes')
-      )
-    );
-  }
+  const fail = (name: string) => (err: unknown) => {
+    console.error(`Falha ao ler "${name}" do Firestore:`, err);
+    callbacks.onError(name, err);
+  };
 
+  // Solicitações de adiantamento (todos os perfis internos)
   unsubs.push(
     onSnapshot(
-      query(collection(db, 'cadastros'), orderBy('criadoEm', 'desc')),
+      query(collection(db, 'solicitacoes'), orderBy('createdAt', 'desc')),
       (snap) => {
-        callbacks.onCadastros(
+        callbacks.onRequests(
           snap.docs.map((d) => {
             const data = d.data();
             return {
-              ...(data as Omit<CadastroPrestador, 'id' | 'criadoEm' | 'concluidoEm'>),
+              ...(data as Omit<AdvanceRequest, 'id' | 'createdAt'>),
               id: d.id,
-              criadoEm: toIsoString(data.criadoEm),
-              concluidoEm: data.concluidoEm ? toIsoString(data.concluidoEm) : undefined,
+              createdAt: toIsoString(data.createdAt),
             };
           })
         );
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'cadastros')
+      fail('solicitacoes')
     )
   );
 
-  unsubs.push(
-    onSnapshot(
-      query(collection(db, 'notas'), orderBy('criadoEm', 'desc')),
-      (snap) => {
-        callbacks.onNotas(
-          snap.docs.map((d) => {
-            const data = d.data();
-            return {
-              ...(data as Omit<NotaFiscalEquipe, 'id' | 'criadoEm' | 'atualizadoEm'>),
-              id: d.id,
-              criadoEm: toIsoString(data.criadoEm),
-              atualizadoEm: toIsoString(data.atualizadoEm),
-            };
-          })
-        );
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'notas')
-    )
-  );
-
-  unsubs.push(
-    onSnapshot(
-      query(collection(db, 'comprovantes'), orderBy('criadoEm', 'desc')),
-      (snap) => {
-        callbacks.onComprovantes(
-          snap.docs.map((d) => {
-            const data = d.data();
-            return {
-              ...(data as Omit<ComprovanteServico, 'id' | 'criadoEm'>),
-              id: d.id,
-              criadoEm: toIsoString(data.criadoEm),
-            };
-          })
-        );
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'comprovantes')
-    )
-  );
-
+  // Auditoria (todos os perfis internos)
   unsubs.push(
     onSnapshot(
       query(collection(db, 'auditoria'), orderBy('criadoEm', 'desc')),
@@ -414,32 +475,100 @@ export function subscribeTeamCollections(callbacks: {
           })
         );
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'auditoria')
+      fail('auditoria')
     )
   );
 
-  if (callbacks.isAdmin && callbacks.onUsers) {
-    getDocs(collection(db, 'usuarios'))
-      .then((snap) => {
-        callbacks.onUsers?.(
-          snap.docs.map((d) => {
-            const data = d.data();
-            return {
-              id: d.id,
-              name: data.name,
-              email: data.email,
-              cpfCnpj: data.cpfCnpj || '',
-              phone: data.phone || '',
-              role: data.role,
-              active: data.ativo !== false,
-              ativo: data.ativo !== false,
-              createdAt: data.createdAt || '',
-              isFirstLogin: !!data.isFirstLogin,
-            };
-          })
-        );
-      })
-      .catch((err) => handleFirestoreError(err, OperationType.LIST, 'usuarios'));
+  if (canReadTeamCollections) {
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'cadastros'), orderBy('criadoEm', 'desc')),
+        (snap) => {
+          callbacks.onCadastros(
+            snap.docs.map((d) => {
+              const data = d.data();
+              return {
+                ...(data as Omit<CadastroPrestador, 'id' | 'criadoEm' | 'concluidoEm'>),
+                id: d.id,
+                criadoEm: toIsoString(data.criadoEm),
+                concluidoEm: data.concluidoEm ? toIsoString(data.concluidoEm) : undefined,
+              };
+            })
+          );
+        },
+        fail('cadastros')
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'notas'), orderBy('criadoEm', 'desc')),
+        (snap) => {
+          callbacks.onNotas(
+            snap.docs.map((d) => {
+              const data = d.data();
+              return {
+                ...(data as Omit<NotaFiscalEquipe, 'id' | 'criadoEm' | 'atualizadoEm'>),
+                id: d.id,
+                criadoEm: toIsoString(data.criadoEm),
+                atualizadoEm: toIsoString(data.atualizadoEm),
+              };
+            })
+          );
+        },
+        fail('notas')
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'comprovantes'), orderBy('criadoEm', 'desc')),
+        (snap) => {
+          callbacks.onComprovantes(
+            snap.docs.map((d) => {
+              const data = d.data();
+              return {
+                ...(data as Omit<ComprovanteServico, 'id' | 'criadoEm'>),
+                id: d.id,
+                criadoEm: toIsoString(data.criadoEm),
+              };
+            })
+          );
+        },
+        fail('comprovantes')
+      )
+    );
+  }
+
+  // Usuários: somente Administrador / Financeiro podem listar
+  if (isAdmin) {
+    unsubs.push(
+      onSnapshot(
+        collection(db, 'usuarios'),
+        (snap) => {
+          callbacks.onUsers(
+            snap.docs
+              .map((d) => {
+                const data = d.data();
+                return {
+                  id: d.id,
+                  name: data.name,
+                  email: data.email,
+                  cpfCnpj: data.cpfCnpj || '',
+                  phone: data.phone || '',
+                  role: data.role,
+                  active: data.ativo !== false,
+                  ativo: data.ativo !== false,
+                  createdAt: data.createdAt || '',
+                  isFirstLogin: !!data.isFirstLogin,
+                } as User;
+              })
+              .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
+          );
+        },
+        fail('usuarios')
+      )
+    );
   }
 
   return () => unsubs.forEach((u) => u());
