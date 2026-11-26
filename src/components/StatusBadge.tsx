@@ -41,6 +41,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, className = ''
       case 'Aguardando pagamento':
         return { bg: 'bg-cyan-50 text-cyan-700 border-cyan-200', icon: <DollarSign className="w-3.5 h-3.5" /> };
       case 'Pago':
+      case 'Aguardando comprovante':
       case 'Aguardando prestação de contas':
         return { bg: 'bg-teal-50 text-teal-700 border-teal-200', icon: <Send className="w-3.5 h-3.5" /> };
       case 'Prestação em análise':

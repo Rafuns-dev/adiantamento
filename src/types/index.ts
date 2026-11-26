@@ -110,6 +110,7 @@ export type RequestStatus =
   | 'Nota Fiscal devolvida para correção'
   | 'Aguardando pagamento'
   | 'Pago'
+  | 'Aguardando comprovante'
   | 'Aguardando prestação de contas'
   | 'Prestação em análise'
   | 'Prestação devolvida para ajustes'

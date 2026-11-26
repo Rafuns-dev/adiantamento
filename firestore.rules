@@ -146,26 +146,23 @@ service cloud.firestore {
     }
 
     function isValidComprovante(data) {
-      return data.keys().hasAll([
-          'notaId', 'prestadorId', 'descricao', 'data', 'arquivoPath',
-          'tipo', 'tamanho', 'criadoPorUid', 'criadoPorNome', 'criadoEm'
-        ]) &&
-        data.keys().hasOnly([
-          'notaId', 'prestadorId', 'categoria', 'valor', 'descricao', 'data', 'arquivoPath', 'arquivoNome',
-          'tipo', 'tamanho', 'criadoPorUid', 'criadoPorNome', 'criadoEm'
-        ]) &&
-        isValidId(data.notaId) &&
-        isValidId(data.prestadorId) &&
+      return (
+        (('notaId' in data && isValidId(data.notaId)) || ('requestId' in data && isValidId(data.requestId))) &&
+        (!('notaId' in data) || isValidId(data.notaId)) &&
+        (!('requestId' in data) || isValidId(data.requestId)) &&
+        (!('prestadorId' in data) || isValidId(data.prestadorId)) &&
+        (!('prestadorName' in data) || (data.prestadorName is string && data.prestadorName.size() <= 150)) &&
         (!('categoria' in data) || data.categoria in ['Hospedagem', 'Combustível', 'Alimentação', 'Almoço', 'Pedágios', 'Estacionamento', 'Outras despesas']) &&
         (!('valor' in data) || (data.valor is number && data.valor >= 0)) &&
-        data.descricao is string && data.descricao.size() >= 2 && data.descricao.size() <= 500 &&
+        data.descricao is string && data.descricao.size() >= 1 && data.descricao.size() <= 500 &&
         data.data is string && data.data.size() >= 8 && data.data.size() <= 20 &&
         data.arquivoPath is string && data.arquivoPath.size() >= 1 && data.arquivoPath.size() <= 500 &&
         (!('arquivoNome' in data) || (data.arquivoNome is string && data.arquivoNome.size() <= 250)) &&
         data.tipo in ['application/pdf', 'image/jpeg', 'image/png'] &&
         data.tamanho is number && data.tamanho > 0 && data.tamanho <= 10485760 &&
         data.criadoPorUid is string && data.criadoPorUid.size() <= 128 &&
-        data.criadoPorNome is string && data.criadoPorNome.size() >= 2 && data.criadoPorNome.size() <= 150;
+        data.criadoPorNome is string && data.criadoPorNome.size() >= 2 && data.criadoPorNome.size() <= 150
+      );
     }
 
     function isValidAuditoria(data) {
@@ -195,6 +192,14 @@ service cloud.firestore {
          incoming().ativo == existing().ativo)
       );
       allow delete: if isValidId(uid) && admin();
+    }
+
+    match /solicitacoes/{id} {
+      allow get: if isValidId(id) && interno();
+      allow list: if interno();
+      allow create: if isValidId(id) && interno();
+      allow update: if isValidId(id) && interno();
+      allow delete: if isValidId(id) && admin();
     }
 
     // cadastros: formulário público cria com exatos 16 campos; leitura por acessoFluxoEquipes(); update e delete apenas admin() (Financeiro & Coordenação)
@@ -240,7 +245,10 @@ service cloud.firestore {
         isValidComprovante(incoming()) &&
         incoming().criadoPorUid == request.auth.uid &&
         incoming().criadoEm == request.time &&
-        exists(/databases/$(database)/documents/notas/$(incoming().notaId));
+        (
+          (!('notaId' in incoming()) || exists(/databases/$(database)/documents/notas/$(incoming().notaId))) &&
+          (!('requestId' in incoming()) || exists(/databases/$(database)/documents/solicitacoes/$(incoming().requestId)))
+        );
       allow update: if false;
       allow delete: if isValidId(id) && admin();
     }

@@ -247,7 +247,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const saved = localStorage.getItem('ameta_requests');
     if (!saved) return INITIAL_REQUESTS;
     const parsed: AdvanceRequest[] = JSON.parse(saved);
-    return parsed.filter((r) => !LEGACY_DEMO_REQUEST_IDS.has(r.id));
+    return parsed
+      .filter((r) => !LEGACY_DEMO_REQUEST_IDS.has(r.id))
+      .map((r) => {
+        const isAmeta = r.requesterRole === 'vistoria_ameta';
+        if (
+          isAmeta &&
+          (r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal')
+        ) {
+          return { ...r, status: 'Aguardando comprovante' as RequestStatus };
+        }
+        return r;
+      });
   });
 
   const [cadastros, setCadastros] = useState<CadastroPrestador[]>(() => {
@@ -343,7 +354,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             onNotas: setNotasEquipe,
             onComprovantes: setComprovantes,
             onAuditoria: setAuditoria,
-            onRequests: setRequests,
+            onRequests: (fbRequests) => {
+              const cleaned = fbRequests
+                .filter((r) => !LEGACY_DEMO_REQUEST_IDS.has(r.id))
+                .map((r) => {
+                  const isAmeta = r.requesterRole === 'vistoria_ameta';
+                  if (
+                    isAmeta &&
+                    (r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal')
+                  ) {
+                    return { ...r, status: 'Aguardando comprovante' as RequestStatus };
+                  }
+                  return r;
+                });
+              setRequests(cleaned);
+            },
             onUsers: (fbUsers) => {
               if (fbUsers.length > 0) setUsers(fbUsers);
             },
@@ -537,11 +562,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           statusBefore,
           statusAfter,
         };
-        return {
+        const updated: AdvanceRequest = {
           ...req,
           status: statusAfter || req.status,
           history: [newEntry, ...req.history],
         };
+        if (firebaseAuthenticated) {
+          upsertRequestFirestore(updated).catch(console.error);
+        }
+        return updated;
       })
     );
   };
@@ -586,29 +615,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ],
     };
     setRequests((prev) => [newReq, ...prev]);
+    if (firebaseAuthenticated) {
+      upsertRequestFirestore(newReq).catch(console.error);
+    }
     addNotification('Nova Solicitação', `Solicitação ${newCode} enviada para análise.`);
   };
 
   const approveRequest = (id: string, comment?: string, approvedAmount?: number) => {
     const req = requests.find((r) => r.id === id);
     if (!req) return;
+    const isAmeta =
+      req.requesterRole === 'vistoria_ameta' ||
+      users.find((u) => u.id === req.operatorId)?.role === 'vistoria_ameta';
+
     const validAmount =
       approvedAmount !== undefined && !Number.isNaN(approvedAmount) && approvedAmount > 0
         ? approvedAmount
         : undefined;
-    if (validAmount !== undefined) {
-      setRequests((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, amountRequested: validAmount } : r))
-      );
-    }
+
+    const nextStatus: RequestStatus = isAmeta ? 'Aguardando comprovante' : 'Em análise financeira';
+    const actionTitle = isAmeta
+      ? 'Solicitação Aprovada pelo Coordenador (Sem NF - Direto para Comprovantes)'
+      : 'Solicitação Aprovada pelo Coordenador / Financeiro';
+
     const amountNote = validAmount
       ? `Valor definido pelo Coordenador: R$ ${validAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
       : '';
     const fullComment = [amountNote, comment].filter(Boolean).join(' — ') || undefined;
-    logAction(id, 'Solicitação Aprovada pelo Coordenador / Financeiro', fullComment, req.status, 'Em análise financeira');
+
+    setRequests((prev) =>
+      prev.map((r) => {
+        if (r.id !== id) return r;
+        const newEntry = {
+          id: 'h-' + Date.now() + Math.random().toString(36).substr(2, 4),
+          date: new Date().toISOString(),
+          authorId: currentUser?.id || 'admin',
+          authorName: currentUser?.name || 'Administrador',
+          authorRole: currentUser?.role || 'admin',
+          title: actionTitle,
+          comment: fullComment,
+          statusBefore: r.status,
+          statusAfter: nextStatus,
+        };
+        const updated: AdvanceRequest = {
+          ...r,
+          amountRequested: validAmount !== undefined ? validAmount : r.amountRequested,
+          status: nextStatus,
+          history: [newEntry, ...r.history],
+        };
+        if (firebaseAuthenticated) {
+          upsertRequestFirestore(updated).catch(console.error);
+        }
+        return updated;
+      })
+    );
+
     addNotification(
       'Solicitação Aprovada',
-      validAmount
+      isAmeta
+        ? `A solicitação ${req.code} foi aprovada sem necessidade de Nota Fiscal, direcionada aos comprovantes para conferência.`
+        : validAmount
         ? `A solicitação ${req.code} foi aprovada com valor de R$ ${validAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}.`
         : `A solicitação ${req.code} foi aprovada.`
     );

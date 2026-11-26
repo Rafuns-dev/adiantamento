@@ -36,6 +36,7 @@ export const ComprovantesArea: React.FC = () => {
     notasEquipe,
     comprovantes,
     requests,
+    users,
     createComprovante,
     deleteComprovante,
     finalizeActivity,
@@ -73,13 +74,15 @@ export const ComprovantesArea: React.FC = () => {
 
   const isAdmin = currentUser.role === 'admin' || currentUser.role === 'financeiro';
   const canAttach = currentUser.role === 'vistoria_ameta' || isAdmin;
-
   const isAmetaTeam = currentUser.role === 'vistoria_ameta';
 
   const ametaRequestsList = useMemo(() => {
-    if (!isAmetaTeam) return [];
     return requests.filter((r) => {
-      if (r.operatorId !== currentUser.id) return false;
+      const isAmetaReq =
+        r.requesterRole === 'vistoria_ameta' ||
+        users.find((u) => u.id === r.operatorId)?.role === 'vistoria_ameta';
+      if (!isAmetaReq) return false;
+      if (isAmetaTeam && r.operatorId !== currentUser.id) return false;
       if (r.status === 'Rejeitado' || r.status === 'Cancelado') return false;
       if (statusFilter !== 'ALL') {
         if (statusFilter === 'Comprovada' && r.status !== 'Finalizado') return false;
@@ -89,6 +92,7 @@ export const ComprovantesArea: React.FC = () => {
         const q = searchTerm.trim().toLowerCase();
         const match =
           r.code.toLowerCase().includes(q) ||
+          r.operatorName.toLowerCase().includes(q) ||
           r.destination.toLowerCase().includes(q) ||
           r.purpose.toLowerCase().includes(q) ||
           (r.activities && r.activities.toLowerCase().includes(q));
@@ -96,7 +100,7 @@ export const ComprovantesArea: React.FC = () => {
       }
       return true;
     });
-  }, [requests, currentUser, isAmetaTeam, statusFilter, searchTerm]);
+  }, [requests, currentUser, isAmetaTeam, statusFilter, searchTerm, users]);
 
   const [selectedRequest, setSelectedRequest] = useState<AdvanceRequest | null>(null);
 
@@ -366,13 +370,15 @@ export const ComprovantesArea: React.FC = () => {
           <h2 className="text-xl font-extrabold text-slate-900 flex items-center gap-2">
             <Camera className="w-6 h-6 text-teal-600" />
             <span>
-              {isAmetaTeam ? 'Minhas Atividades e Comprovantes' : 'Comprovantes de Serviço'}
+              {isAmetaTeam
+                ? 'Minhas Atividades e Comprovantes'
+                : 'Conferência de Comprovantes (Vistoriador AMETA)'}
             </span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
             {isAmetaTeam
               ? 'Selecione uma solicitação aprovada para anexar comprovantes e finalizar a atividade.'
-              : 'Selecione uma nota fiscal existente para lançar despesas e anexar comprovantes.'}
+              : 'Conferência dos adiantamentos e comprovantes de despesas da equipe AMETA (sem exigência de NF).'}
           </p>
         </div>
       </div>
@@ -406,7 +412,7 @@ export const ComprovantesArea: React.FC = () => {
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder={isAmetaTeam ? 'Buscar solicitação, destino ou atividades...' : 'Buscar nota, prestador ou CNPJ...'}
+            placeholder={isAmetaTeam ? 'Buscar solicitação, destino ou atividades...' : 'Buscar solicitação, vistoriador ou destino...'}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
@@ -416,10 +422,10 @@ export const ComprovantesArea: React.FC = () => {
 
       {/* Grid: Ameta Requests or Notes */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        {isAmetaTeam ? (
+        {isAmetaTeam || isAdmin ? (
           ametaRequestsList.length === 0 ? (
             <div className="col-span-full bg-white rounded-2xl border border-slate-200 p-12 text-center text-xs text-slate-500">
-              Nenhuma solicitação de adiantamento encontrada para anexar comprovantes.
+              Nenhuma solicitação de adiantamento encontrada para conferência de comprovantes.
             </div>
           ) : (
             ametaRequestsList.map((req) => {
@@ -444,8 +450,11 @@ export const ComprovantesArea: React.FC = () => {
                     </div>
 
                     <div>
-                      <div className="text-sm font-bold text-slate-800">{req.destination}</div>
-                      <div className="text-xs text-teal-700 font-semibold">{req.purpose}</div>
+                      {isAdmin && (
+                        <div className="text-sm font-bold text-slate-900">{req.operatorName}</div>
+                      )}
+                      <div className="text-xs font-semibold text-slate-700">{req.destination}</div>
+                      <div className="text-xs text-teal-700 font-medium">{req.purpose}</div>
                       {req.activities && (
                         <div className="text-xs text-slate-600 line-clamp-2 mt-1">
                           Atividades: {req.activities}
@@ -480,7 +489,11 @@ export const ComprovantesArea: React.FC = () => {
                     className="w-full py-2.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors"
                   >
                     <Camera className="w-4 h-4" />
-                    <span>Abrir Solicitação e Anexar Comprovantes</span>
+                    <span>
+                      {isAdmin
+                        ? 'Conferir Comprovantes'
+                        : 'Abrir Solicitação e Anexar Comprovantes'}
+                    </span>
                   </button>
                 </div>
               );
@@ -1043,7 +1056,7 @@ export const ComprovantesArea: React.FC = () => {
                     className="px-3.5 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    <span>Finalizar Atividade</span>
+                    <span>{isAdmin ? 'Concluir Conferência' : 'Finalizar Atividade'}</span>
                   </button>
                 )}
                 <button
@@ -1060,7 +1073,7 @@ export const ComprovantesArea: React.FC = () => {
               <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3 shadow-xs">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <span className="font-extrabold text-slate-800 uppercase tracking-wider">
-                    Dados da Solicitação de Adiantamento
+                    Dados da Solicitação de Adiantamento (Sem Nota Fiscal)
                   </span>
                   <span
                     className={`inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-0.5 rounded-md ${
@@ -1072,7 +1085,13 @@ export const ComprovantesArea: React.FC = () => {
                     {selectedRequest.status}
                   </span>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <div>
+                    <span className="text-slate-500 block">Vistoriador AMETA:</span>
+                    <span className="font-extrabold text-slate-900 text-sm">
+                      {selectedRequest.operatorName}
+                    </span>
+                  </div>
                   <div>
                     <span className="text-slate-500 block">Valor Solicitado:</span>
                     <span className="font-extrabold text-slate-900 text-sm tabular-nums">
@@ -1475,14 +1494,14 @@ export const ComprovantesArea: React.FC = () => {
                         className="w-full py-3 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-teal-900/40 transition-all flex items-center justify-center gap-2"
                       >
                         <CheckCircle2 className="w-4 h-4" />
-                        <span>Finalizar Atividade</span>
+                        <span>{isAdmin ? 'Concluir / Finalizar Conferência' : 'Finalizar Atividade'}</span>
                       </button>
                     )}
 
                     {selectedRequest.status === 'Finalizado' && (
                       <div className="w-full py-3 bg-teal-900/60 border border-teal-700 text-teal-300 rounded-xl text-xs font-bold flex items-center justify-center gap-2">
                         <CheckCircle2 className="w-4 h-4" />
-                        <span>Atividade Finalizada</span>
+                        <span>{isAdmin ? 'Conferência Concluída' : 'Atividade Finalizada'}</span>
                       </div>
                     )}
                   </div>

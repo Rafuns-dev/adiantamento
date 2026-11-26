@@ -54,6 +54,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const roleMeta = ROLE_META[role];
 
   const notasAguardandoComp = notasEquipe.filter((n) => n.status === 'Aguardando comprovante').length;
+  const ametaAguardandoComp = requests.filter(
+    (r) =>
+      r.requesterRole === 'vistoria_ameta' &&
+      r.status === 'Aguardando comprovante'
+  ).length;
   const cadastrosPendentes = cadastros.filter((c) => c.status !== 'Concluído').length;
 
   // Equipe de Vistoria – Notas (isolada)
@@ -136,15 +141,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'ameta-comprovantes',
       label: 'Comprovantes (Vist. AMETA)',
       icon: <Camera className="w-5 h-5" />,
-      badge: notasAguardandoComp,
+      badge: ametaAguardandoComp,
     },
     {
       id: 'fin-received',
       label: 'Solicitações Recebidas',
       icon: <FileText className="w-5 h-5" />,
-      badge: requests.filter(
-        (r) => r.status === 'Solicitação enviada' || r.status === 'Em análise financeira'
-      ).length,
+      badge: requests.filter((r) => r.status === 'Solicitação enviada').length,
     },
     {
       id: 'fin-auth-nf',
@@ -152,7 +155,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <FileCheck2 className="w-5 h-5" />,
       badge: requests.filter(
         (r) =>
-          r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal'
+          r.requesterRole !== 'vistoria_ameta' &&
+          (r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal')
       ).length,
     },
     {

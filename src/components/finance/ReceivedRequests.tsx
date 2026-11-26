@@ -13,6 +13,7 @@ import {
   Clock,
   X,
   Search,
+  Camera,
 } from 'lucide-react';
 import { AdvanceRequest } from '../../types';
 
@@ -25,8 +26,15 @@ function calcDays(startDate: string, endDate: string): number | null {
   return diff > 0 ? diff : 1;
 }
 
-export const ReceivedRequests: React.FC = () => {
+interface ReceivedRequestsProps {
+  currentTab?: string;
+  setCurrentTab?: (tab: string) => void;
+}
+
+export const ReceivedRequests: React.FC<ReceivedRequestsProps> = ({ currentTab, setCurrentTab }) => {
   const { requests, approveRequest, rejectRequest, returnRequestForAdjustment, authorizeInvoice } = useApp();
+
+  const isAuthNfTab = currentTab === 'fin-auth-nf';
 
   const [detailReq, setDetailReq] = useState<AdvanceRequest | null>(null);
   const [activeModalReq, setActiveModalReq] = useState<AdvanceRequest | null>(null);
@@ -42,6 +50,7 @@ export const ReceivedRequests: React.FC = () => {
   );
 
   const filteredRequests = requests.filter(req => {
+    if (isAuthNfTab && req.requesterRole === 'vistoria_ameta') return false;
     const matchesName =
       !nameFilter.trim() ||
       req.operatorName.toLowerCase().includes(nameFilter.trim().toLowerCase());
@@ -100,10 +109,14 @@ export const ReceivedRequests: React.FC = () => {
         <div>
           <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 flex items-center gap-2">
             <FileText className="w-5 h-5 sm:w-6 sm:h-6 text-teal-600 shrink-0" />
-            <span>Solicitações de Adiantamento Recebidas</span>
+            <span>
+              {isAuthNfTab ? 'Autorizações de Nota Fiscal' : 'Solicitações de Adiantamento Recebidas'}
+            </span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Abra a solicitação para conferir os acionamentos e calcular o valor antes de aprovar, rejeitar, devolver ou autorizar.
+            {isAuthNfTab
+              ? 'Autorize a emissão de Nota Fiscal para operadores externos e prestadores que requerem emissão fiscal.'
+              : 'Abra a solicitação para conferir os acionamentos e calcular o valor antes de aprovar, rejeitar ou devolver.'}
           </p>
         </div>
 
@@ -237,7 +250,8 @@ export const ReceivedRequests: React.FC = () => {
                               onClick={() => openActionModal(req, 'approve')}
                               className="px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1"
                             >
-                              <CheckCircle2 className="w-3.5 h-3.5" /> Aprovar
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              {req.requesterRole === 'vistoria_ameta' ? 'Aprovar (Sem NF)' : 'Aprovar'}
                             </button>
                             <button
                               onClick={() => openActionModal(req, 'return')}
@@ -254,14 +268,32 @@ export const ReceivedRequests: React.FC = () => {
                           </>
                         )}
 
-                        {req.status === 'Em análise financeira' && !req.invoiceAuthorized && (
-                          <button
-                            onClick={() => openActionModal(req, 'authorize')}
-                            className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1"
-                          >
-                            <FileCheck className="w-3.5 h-3.5" /> Autorizar NF
-                          </button>
-                        )}
+                        {req.requesterRole === 'vistoria_ameta' &&
+                          (req.status === 'Aguardando comprovante' ||
+                            req.status === 'Em análise financeira' ||
+                            req.status === 'Autorizado emitir Nota Fiscal' ||
+                            req.status === 'Finalizado') && (
+                            <button
+                              onClick={() => {
+                                if (setCurrentTab) setCurrentTab('ameta-comprovantes');
+                                else setDetailReq(req);
+                              }}
+                              className="px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1 shadow-xs"
+                            >
+                              <Camera className="w-3.5 h-3.5" /> Conferir Comprovantes
+                            </button>
+                          )}
+
+                        {req.status === 'Em análise financeira' &&
+                          !req.invoiceAuthorized &&
+                          req.requesterRole !== 'vistoria_ameta' && (
+                            <button
+                              onClick={() => openActionModal(req, 'authorize')}
+                              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1"
+                            >
+                              <FileCheck className="w-3.5 h-3.5" /> Autorizar NF
+                            </button>
+                          )}
                       </div>
                     </td>
                   </tr>
@@ -433,19 +465,36 @@ export const ReceivedRequests: React.FC = () => {
                       onClick={() => openActionModal(detailReq, 'approve')}
                       className="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1.5 shadow-sm"
                     >
-                      <CheckCircle2 className="w-4 h-4" /> Aprovar e Definir Valor
+                      <CheckCircle2 className="w-4 h-4" />
+                      {detailReq.requesterRole === 'vistoria_ameta'
+                        ? 'Aprovar (Direto para Comprovantes)'
+                        : 'Aprovar e Definir Valor'}
                     </button>
                   </>
                 )}
 
-                {detailReq.status === 'Em análise financeira' && !detailReq.invoiceAuthorized && (
+                {detailReq.requesterRole === 'vistoria_ameta' && (
                   <button
-                    onClick={() => openActionModal(detailReq, 'authorize')}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1.5"
+                    onClick={() => {
+                      setDetailReq(null);
+                      if (setCurrentTab) setCurrentTab('ameta-comprovantes');
+                    }}
+                    className="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1.5 shadow-sm"
                   >
-                    <FileCheck className="w-4 h-4" /> Autorizar NF
+                    <Camera className="w-4 h-4" /> Conferir Comprovantes
                   </button>
                 )}
+
+                {detailReq.status === 'Em análise financeira' &&
+                  !detailReq.invoiceAuthorized &&
+                  detailReq.requesterRole !== 'vistoria_ameta' && (
+                    <button
+                      onClick={() => openActionModal(detailReq, 'authorize')}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1.5"
+                    >
+                      <FileCheck className="w-4 h-4" /> Autorizar NF
+                    </button>
+                  )}
               </div>
             </div>
           </div>
@@ -459,7 +508,7 @@ export const ReceivedRequests: React.FC = () => {
             <div className="flex items-center justify-between border-b border-slate-100 pb-4">
               <div>
                 <h3 className="font-extrabold text-slate-900 text-lg">
-                  {modalAction === 'approve' && 'Aprovar Solicitação'}
+                  {modalAction === 'approve' && (activeModalReq.requesterRole === 'vistoria_ameta' ? 'Aprovar Solicitação (Vistoriador AMETA)' : 'Aprovar Solicitação')}
                   {modalAction === 'reject' && 'Rejeitar Solicitação'}
                   {modalAction === 'return' && 'Devolver para Ajustes'}
                   {modalAction === 'authorize' && 'Autorizar Emissão de Nota Fiscal'}
@@ -479,6 +528,18 @@ export const ReceivedRequests: React.FC = () => {
                 ✕
               </button>
             </div>
+
+            {activeModalReq.requesterRole === 'vistoria_ameta' && modalAction === 'approve' && (
+              <div className="bg-teal-50 border border-teal-200 text-teal-900 p-3.5 rounded-xl text-xs font-medium space-y-1">
+                <span className="font-extrabold flex items-center gap-1.5 text-teal-800">
+                  <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+                  Perfil Vistoriador AMETA — Sem Nota Fiscal
+                </span>
+                <p className="text-teal-900">
+                  Esta solicitação não exige emissão de NF. Ao aprovar, o status vai diretamente para <strong>Aguardando comprovante</strong> para conferência na aba de Comprovantes.
+                </p>
+              </div>
+            )}
 
             {/* Read-only Acionamentos & Details visible while calculating/approving */}
             <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 text-xs space-y-2">

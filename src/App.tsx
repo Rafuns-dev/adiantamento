@@ -140,7 +140,7 @@ function MainContent() {
         return <FinanceDashboard setCurrentTab={setCurrentTab} />;
       case 'fin-received':
       case 'fin-auth-nf':
-        return <ReceivedRequests />;
+        return <ReceivedRequests setCurrentTab={setCurrentTab} currentTab={currentTab} />;
       case 'fin-conf-nf':
         return <InvoiceReview />;
       case 'fin-payments':
