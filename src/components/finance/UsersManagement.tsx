@@ -5,7 +5,7 @@ import { User, UserRole } from '../../types';
 import { ROLE_META } from '../../utils/roleConfig';
 
 export const UsersManagement: React.FC = () => {
-  const { users, currentUser, addUser, updateUser, toggleUserStatus } = useApp();
+  const { users, currentUser, addUser, updateUser, toggleUserStatus, sendPasswordReset } = useApp();
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -16,6 +16,8 @@ export const UsersManagement: React.FC = () => {
   const [role, setRole] = useState<UserRole>('operador');
   const [password, setPassword] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const isAdminOrCoord = currentUser?.role === 'admin' || currentUser?.role === 'financeiro';
 
@@ -41,10 +43,12 @@ export const UsersManagement: React.FC = () => {
     setPhone('');
     setRole('operador');
     setPassword('');
+    setErrorMsg('');
     setModalOpen(true);
   };
 
   const openEditModal = (u: User) => {
+    setErrorMsg('');
     setEditingUser(u);
     setName(u.name);
     setEmail(u.email);
@@ -55,40 +59,54 @@ export const UsersManagement: React.FC = () => {
     setModalOpen(true);
   };
 
-  const handleSaveUser = (e: React.FormEvent) => {
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !email) return;
 
     const cleanPass = password.trim();
+    setErrorMsg('');
+    setSaving(true);
 
-    if (editingUser) {
-      updateUser(editingUser.id, {
-        name,
-        email,
-        cpfCnpj,
-        phone,
-        role,
-        ...(cleanPass ? { password: cleanPass, isFirstLogin: false } : {}),
-      });
-      setSuccessMsg(`Usuário ${name} atualizado com sucesso!`);
-    } else {
-      addUser({
-        name,
-        email,
-        cpfCnpj,
-        phone,
-        role,
-        ...(cleanPass ? { password: cleanPass, isFirstLogin: false } : {}),
-      });
-      setSuccessMsg(
-        cleanPass
-          ? `Usuário ${name} cadastrado com senha definida!`
-          : `Usuário ${name} cadastrado com senha padrão 'ameta123'!`
-      );
+    try {
+      if (editingUser) {
+        // O e-mail de login não muda aqui (ele é a conta no Firebase Authentication).
+        await updateUser(editingUser.id, { name, cpfCnpj, phone, role });
+        setSuccessMsg(`Usuário ${name} atualizado com sucesso!`);
+      } else {
+        await addUser({
+          name,
+          email,
+          cpfCnpj,
+          phone,
+          role,
+          ...(cleanPass ? { password: cleanPass } : {}),
+        });
+        setSuccessMsg(
+          cleanPass
+            ? `Usuário ${name} cadastrado com senha definida!`
+            : `Usuário ${name} cadastrado com senha padrão 'ameta123'!`
+        );
+      }
+      setModalOpen(false);
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Não foi possível salvar o usuário.');
+    } finally {
+      setSaving(false);
     }
+  };
 
-    setModalOpen(false);
-    setTimeout(() => setSuccessMsg(''), 3000);
+  const handleResetPassword = async () => {
+    if (!editingUser) return;
+    setErrorMsg('');
+    try {
+      await sendPasswordReset(editingUser.email);
+      setSuccessMsg(`E-mail de redefinição de senha enviado para ${editingUser.email}.`);
+      setModalOpen(false);
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Não foi possível enviar o e-mail.');
+    }
   };
 
   return (
@@ -228,11 +246,19 @@ export const UsersManagement: React.FC = () => {
                 <input
                   type="email"
                   required
+                  readOnly={!!editingUser}
                   placeholder="exemplo@ameta.com.br"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl"
+                  className={`w-full p-3 border border-slate-200 rounded-xl ${
+                    editingUser ? 'bg-slate-100 text-slate-500' : 'bg-slate-50'
+                  }`}
                 />
+                {editingUser && (
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    O e-mail é o login do usuário no Firebase e não pode ser alterado aqui.
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -292,22 +318,40 @@ export const UsersManagement: React.FC = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  {editingUser ? 'Nova Senha (opcional)' : 'Senha de Acesso (opcional)'}
-                </label>
-                <input
-                  type="password"
-                  placeholder={
-                    editingUser
-                      ? 'Deixe em branco para manter a senha atual'
-                      : "Deixe em branco para usar a padrão 'ameta123'"
-                  }
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl"
-                />
-              </div>
+              {editingUser ? (
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
+                  <p className="text-[11px] text-slate-600">
+                    A senha fica guardada com segurança no Firebase e não pode ser alterada por aqui.
+                    Para trocar, envie um e-mail de redefinição para o usuário.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleResetPassword}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100"
+                  >
+                    Enviar e-mail de redefinição de senha
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    Senha de Acesso (opcional)
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="Deixe em branco para usar a padrão 'ameta123'"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+              )}
+
+              {errorMsg && (
+                <p className="text-[12px] font-semibold text-red-700 bg-red-50 p-2.5 rounded-xl border border-red-200">
+                  {errorMsg}
+                </p>
+              )}
 
               {!editingUser && !password.trim() && (
                 <p className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
@@ -326,9 +370,10 @@ export const UsersManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-teal-600 text-white font-bold shadow-md hover:bg-teal-500"
+                  disabled={saving}
+                  className="px-5 py-2 rounded-xl bg-teal-600 text-white font-bold shadow-md hover:bg-teal-500 disabled:opacity-60"
                 >
-                  {editingUser ? 'Salvar Alterações' : 'Cadastrar Usuário'}
+                  {saving ? 'Salvando...' : editingUser ? 'Salvar Alterações' : 'Cadastrar Usuário'}
                 </button>
               </div>
             </form>
