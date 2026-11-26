@@ -38,6 +38,7 @@ import {
   subscribeTeamCollections,
   uploadAuthenticatedFile,
   upsertUserFirestore,
+  upsertRequestFirestore,
 } from '../services/firebaseService';
 import { readFileAsDataUrl } from '../utils/fileHelpers';
 
@@ -84,6 +85,7 @@ interface AppContextType {
   registerRefund: (id: string, refund: RefundData) => void;
   approveReimbursement: (id: string) => void;
   finalizeAccountability: (id: string) => void;
+  finalizeActivity: (requestId: string) => void;
 
   // User Management
   addUser: (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => void;
@@ -131,8 +133,9 @@ interface AppContextType {
   deleteNotaEquipe: (notaId: string) => Promise<void>;
   createComprovante: (
     data: {
-      notaId: string;
-      prestadorId: string;
+      notaId?: string;
+      requestId?: string;
+      prestadorId?: string;
       categoria?: ExpenseCategory;
       valor?: number;
       descricao: string;
@@ -214,8 +217,8 @@ const isLegacyDemoNota = (n: NotaFiscalEquipe): boolean =>
 
 const isLegacyDemoComprovante = (comp: ComprovanteServico): boolean =>
   /^comp-0*\d{1,3}$/.test(comp.id) ||
-  /^nota-(eq-)?0*\d{1,3}$/.test(comp.notaId) ||
-  /^cad-0*\d{1,3}$/.test(comp.prestadorId) ||
+  (comp.notaId ? /^nota-(eq-)?0*\d{1,3}$/.test(comp.notaId) : false) ||
+  (comp.prestadorId ? /^cad-0*\d{1,3}$/.test(comp.prestadorId) : false) ||
   LEGACY_DEMO_AUTHOR_NAMES.has(comp.criadoPorNome);
 
 const isLegacyDemoAuditoria = (a: AuditoriaEntry): boolean =>
@@ -340,6 +343,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             onNotas: setNotasEquipe,
             onComprovantes: setComprovantes,
             onAuditoria: setAuditoria,
+            onRequests: setRequests,
             onUsers: (fbUsers) => {
               if (fbUsers.length > 0) setUsers(fbUsers);
             },
@@ -785,6 +789,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const finalizeActivity = (requestId: string) => {
+    const req = requests.find((r) => r.id === requestId);
+    if (!req) return;
+    logAction(
+      requestId,
+      'Atividade Finalizada',
+      'Vistoriador AMETA finalizou a atividade com os comprovantes anexados.',
+      req.status,
+      'Finalizado'
+    );
+    addNotification('Atividade Finalizada', `A solicitação ${req.code} foi finalizada com sucesso.`);
+  };
+
   const reviewAccountability = (id: string, approved: boolean, comment?: string) => {
     const req = requests.find((r) => r.id === id);
     if (!req || !req.accountability) return;
@@ -1207,8 +1224,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const createComprovante = async (
     data: {
-      notaId: string;
-      prestadorId: string;
+      notaId?: string;
+      requestId?: string;
+      prestadorId?: string;
       categoria?: ExpenseCategory;
       valor?: number;
       descricao: string;
@@ -1218,23 +1236,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     onProgress?: (pct: number) => void
   ): Promise<ComprovanteServico> => {
     if (!currentUser) throw new Error('Usuário não autenticado.');
-    const nota = notasEquipe.find((n) => n.id === data.notaId);
-    if (!nota) throw new Error('É obrigatório existir uma nota fiscal vinculada.');
+    const nota = data.notaId ? notasEquipe.find((n) => n.id === data.notaId) : null;
+    const req = data.requestId ? requests.find((r) => r.id === data.requestId) : null;
+    if (!nota && !req) throw new Error('É obrigatório existir uma nota fiscal ou solicitação vinculada.');
 
     const compId = 'comp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
     let arquivoPath = '';
     let arquivoNome = file.name;
     let arquivoData: string | undefined;
 
+    const folderId = nota ? nota.id : req?.id || 'geral';
     if (firebaseAuthenticated) {
-      const up = await uploadAuthenticatedFile('comprovantes', nota.id, file, onProgress);
+      const up = await uploadAuthenticatedFile('comprovantes', folderId, file, onProgress);
       arquivoPath = up.arquivoPath;
       arquivoNome = up.arquivoNome;
     } else {
       onProgress?.(40);
       arquivoData = await readFileAsDataUrl(file);
       onProgress?.(100);
-      arquivoPath = `comprovantes/${nota.id}/${file.name}`;
+      arquivoPath = `comprovantes/${folderId}/${file.name}`;
     }
 
     const validMime: ComprovanteServico['tipo'] =
@@ -1242,8 +1262,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const novoComp: ComprovanteServico = {
       id: compId,
-      notaId: nota.id,
-      prestadorId: data.prestadorId,
+      notaId: nota?.id,
+      requestId: req?.id,
+      prestadorId: data.prestadorId || req?.operatorId,
+      prestadorName: req?.operatorName || nota?.prestadorNome,
       categoria: data.categoria,
       valor: data.valor !== undefined ? Number(data.valor) : undefined,
       descricao: data.descricao.trim(),
@@ -1260,35 +1282,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setComprovantes((prev) => [novoComp, ...prev]);
 
-    const wasNotComprovada = nota.status !== 'Comprovada';
-    if (wasNotComprovada) {
-      setNotasEquipe((prev) =>
-        prev.map((n) =>
-          n.id === nota.id
-            ? { ...n, status: 'Comprovada', atualizadoEm: new Date().toISOString() }
-            : n
-        )
-      );
+    if (nota) {
+      const wasNotComprovada = nota.status !== 'Comprovada';
+      if (wasNotComprovada) {
+        setNotasEquipe((prev) =>
+          prev.map((n) =>
+            n.id === nota.id
+              ? { ...n, status: 'Comprovada', atualizadoEm: new Date().toISOString() }
+              : n
+          )
+        );
+      }
+      if (firebaseAuthenticated && wasNotComprovada) {
+        await atualizarNotaFirestore(nota.id, { status: 'Comprovada' });
+      }
     }
 
     if (firebaseAuthenticated) {
       const { arquivoData: _, ...firestorePayload } = novoComp;
       await criarComprovanteFirestore(firestorePayload);
-      if (wasNotComprovada) {
-        await atualizarNotaFirestore(nota.id, { status: 'Comprovada' });
-      }
     }
 
     await appendAuditoria(
       'Comprovante enviado',
       'comprovante',
       compId,
-      `Comprovante ${arquivoNome} anexado à nota ${nota.numero}`
+      `Comprovante ${arquivoNome} anexado a ${nota ? `nota ${nota.numero}` : `solicitação ${req?.code}`}`
     );
 
     addNotification(
       'Comprovante Enviado',
-      `Comprovante anexado à nota ${nota.numero} com sucesso.`
+      `Comprovante ${arquivoNome} anexado com sucesso.`
     );
     return novoComp;
   };
@@ -1355,6 +1379,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         registerRefund,
         approveReimbursement,
         finalizeAccountability,
+        finalizeActivity,
         addUser,
         updateUser,
         toggleUserStatus,

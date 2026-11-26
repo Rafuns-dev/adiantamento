@@ -69,8 +69,10 @@ export interface NotaFiscalEquipe {
 
 export interface ComprovanteServico {
   id: string;
-  notaId: string;
-  prestadorId: string;
+  notaId?: string;
+  requestId?: string;
+  prestadorId?: string;
+  prestadorName?: string;
   categoria?: ExpenseCategory;
   valor?: number;
   descricao: string;

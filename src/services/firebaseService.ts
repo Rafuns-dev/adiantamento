@@ -25,6 +25,7 @@ import {
   ComprovanteServico,
   AuditoriaEntry,
   User,
+  AdvanceRequest,
 } from '../types';
 
 function toIsoString(val: unknown): string {
@@ -296,15 +297,48 @@ export async function upsertUserFirestore(user: User): Promise<void> {
   }
 }
 
+export async function upsertRequestFirestore(req: AdvanceRequest): Promise<void> {
+  const path = `solicitacoes/${req.id}`;
+  try {
+    await setDoc(doc(db, 'solicitacoes', req.id), {
+      ...req,
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
 export function subscribeTeamCollections(callbacks: {
   onCadastros: (items: CadastroPrestador[]) => void;
   onNotas: (items: NotaFiscalEquipe[]) => void;
   onComprovantes: (items: ComprovanteServico[]) => void;
   onAuditoria: (items: AuditoriaEntry[]) => void;
+  onRequests?: (items: AdvanceRequest[]) => void;
   onUsers?: (items: User[]) => void;
   isAdmin: boolean;
 }): () => void {
   const unsubs: Array<() => void> = [];
+
+  if (callbacks.onRequests) {
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'solicitacoes'), orderBy('createdAt', 'desc')),
+        (snap) => {
+          callbacks.onRequests?.(
+            snap.docs.map((d) => {
+              const data = d.data();
+              return {
+                ...(data as Omit<AdvanceRequest, 'id' | 'createdAt'>),
+                id: d.id,
+                createdAt: toIsoString(data.createdAt),
+              };
+            })
+          );
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'solicitacoes')
+      )
+    );
+  }
 
   unsubs.push(
     onSnapshot(

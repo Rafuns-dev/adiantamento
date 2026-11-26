@@ -55,7 +55,7 @@ service cloud.firestore {
     }
 
     function interno() {
-      return equipe() || eNota() || eComp();
+      return admin() || equipe() || eNota() || eComp();
     }
 
     function acessoFluxoEquipes() {

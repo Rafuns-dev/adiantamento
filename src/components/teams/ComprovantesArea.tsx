@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { ComprovanteServico, ExpenseCategory, NotaFiscalEquipe } from '../../types';
+import { AdvanceRequest, ComprovanteServico, ExpenseCategory, NotaFiscalEquipe } from '../../types';
 import { DocumentViewerModal } from '../DocumentViewerModal';
 import { downloadFile, readFileAsDataUrl } from '../../utils/fileHelpers';
 import {
@@ -35,8 +35,10 @@ export const ComprovantesArea: React.FC = () => {
     cadastros,
     notasEquipe,
     comprovantes,
+    requests,
     createComprovante,
     deleteComprovante,
+    finalizeActivity,
     logDownloadAuditoria,
     resolveAuthenticatedStorageUrl,
   } = useApp();
@@ -72,7 +74,34 @@ export const ComprovantesArea: React.FC = () => {
   const isAdmin = currentUser.role === 'admin' || currentUser.role === 'financeiro';
   const canAttach = currentUser.role === 'vistoria_ameta' || isAdmin;
 
+  const isAmetaTeam = currentUser.role === 'vistoria_ameta';
+
+  const ametaRequestsList = useMemo(() => {
+    if (!isAmetaTeam) return [];
+    return requests.filter((r) => {
+      if (r.operatorId !== currentUser.id) return false;
+      if (r.status === 'Rejeitado' || r.status === 'Cancelado') return false;
+      if (statusFilter !== 'ALL') {
+        if (statusFilter === 'Comprovada' && r.status !== 'Finalizado') return false;
+        if (statusFilter === 'Aguardando comprovante' && r.status === 'Finalizado') return false;
+      }
+      if (searchTerm.trim()) {
+        const q = searchTerm.trim().toLowerCase();
+        const match =
+          r.code.toLowerCase().includes(q) ||
+          r.destination.toLowerCase().includes(q) ||
+          r.purpose.toLowerCase().includes(q) ||
+          (r.activities && r.activities.toLowerCase().includes(q));
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [requests, currentUser, isAmetaTeam, statusFilter, searchTerm]);
+
+  const [selectedRequest, setSelectedRequest] = useState<AdvanceRequest | null>(null);
+
   const notasList = useMemo(() => {
+    if (isAmetaTeam) return [];
     return notasEquipe.filter((n) => {
       if (statusFilter !== 'ALL' && n.status !== statusFilter) return false;
       if (statusFilter === 'ALL' && n.status === 'Emitida') {
@@ -88,7 +117,7 @@ export const ComprovantesArea: React.FC = () => {
       }
       return true;
     });
-  }, [notasEquipe, statusFilter, searchTerm, isAdmin]);
+  }, [notasEquipe, statusFilter, searchTerm, isAdmin, isAmetaTeam]);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -182,8 +211,8 @@ export const ComprovantesArea: React.FC = () => {
   };
 
   const sendItemsToServer = async (itemsToSend: StagedComprovanteItem[]) => {
-    if (!selectedNota) {
-      setErrorMsg('É obrigatório selecionar uma nota fiscal existente.');
+    if (!selectedNota && !selectedRequest) {
+      setErrorMsg('É obrigatório selecionar uma nota fiscal ou solicitação.');
       return;
     }
     if (itemsToSend.length === 0) {
@@ -199,8 +228,9 @@ export const ComprovantesArea: React.FC = () => {
         const item = itemsToSend[i];
         await createComprovante(
           {
-            notaId: selectedNota.id,
-            prestadorId: selectedNota.prestadorId,
+            notaId: selectedNota?.id,
+            requestId: selectedRequest?.id,
+            prestadorId: (selectedNota?.prestadorId || selectedRequest?.operatorId || currentUser?.id || 'admin') as string,
             categoria: item.categoria,
             valor: item.valor,
             descricao: item.descricao,
@@ -214,13 +244,15 @@ export const ComprovantesArea: React.FC = () => {
         );
       }
 
-      setSelectedNota((prev) => (prev ? { ...prev, status: 'Comprovada' } : null));
+      if (selectedNota) {
+        setSelectedNota((prev) => (prev ? { ...prev, status: 'Comprovada' } : null));
+      }
       setStagedItems([]);
       setSelectedFiles([]);
       setValorInput('');
       setDescricao('');
       showToast(
-        `${itemsToSend.length} comprovante(s) enviado(s) e nota ${selectedNota.numero} marcada como Comprovada!`
+        `${itemsToSend.length} comprovante(s) enviado(s) com sucesso!`
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Erro ao enviar comprovante.');
@@ -232,7 +264,6 @@ export const ComprovantesArea: React.FC = () => {
   const handleSendAll = async () => {
     setErrorMsg('');
     let itemsToSend = [...stagedItems];
-    // If the user filled the form and clicked Enviar directly without clicking Adicionar first
     if (itemsToSend.length === 0 || selectedFiles.length > 0 || (descricao.trim() && valorInput)) {
       if (selectedFiles.length > 0 || descricao.trim() || valorInput) {
         const currentFormItems = buildItemsFromCurrentForm();
@@ -306,15 +337,26 @@ export const ComprovantesArea: React.FC = () => {
     showToast('Download registrado na auditoria.');
   };
 
+  const requestComprovantes = selectedRequest
+    ? comprovantes.filter((c) => c.requestId === selectedRequest.id)
+    : [];
   const notaComprovantes = selectedNota
     ? comprovantes.filter((c) => c.notaId === selectedNota.id)
     : [];
+  const activeComprovantes = isAmetaTeam ? requestComprovantes : notaComprovantes;
 
-  const totalSentAmount = notaComprovantes.reduce((acc, c) => acc + (c.valor || 0), 0);
+  const totalSentAmount = activeComprovantes.reduce((acc, c) => acc + (c.valor || 0), 0);
   const totalStagedAmount = stagedItems.reduce((acc, s) => acc + s.valor, 0);
   const totalCombinedAmount = totalSentAmount + totalStagedAmount;
-  const noteAmount = selectedNota?.valor || 0;
-  const balanceDiff = noteAmount - totalCombinedAmount;
+  const targetAmount = selectedNota?.valor || selectedRequest?.amountRequested || 0;
+  const balanceDiff = targetAmount - totalCombinedAmount;
+
+  const handleFinalizeActivity = () => {
+    if (!selectedRequest) return;
+    finalizeActivity(selectedRequest.id);
+    setSelectedRequest(null);
+    showToast(`Solicitação ${selectedRequest.code} finalizada com sucesso!`);
+  };
 
   return (
     <div className="space-y-6">
@@ -323,11 +365,14 @@ export const ComprovantesArea: React.FC = () => {
         <div>
           <h2 className="text-xl font-extrabold text-slate-900 flex items-center gap-2">
             <Camera className="w-6 h-6 text-teal-600" />
-            <span>Comprovantes de Serviço — Vistoriador AMETA</span>
+            <span>
+              {isAmetaTeam ? 'Minhas Atividades e Comprovantes' : 'Comprovantes de Serviço'}
+            </span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Selecione uma nota fiscal existente para lançar despesas e anexar comprovantes
-            (PDF, JPG ou PNG até 10 MB).
+            {isAmetaTeam
+              ? 'Selecione uma solicitação aprovada para anexar comprovantes e finalizar a atividade.'
+              : 'Selecione uma nota fiscal existente para lançar despesas e anexar comprovantes.'}
           </p>
         </div>
       </div>
@@ -352,7 +397,7 @@ export const ComprovantesArea: React.FC = () => {
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
               }`}
             >
-              {st === 'ALL' ? 'Todas elegíveis' : st}
+              {st === 'ALL' ? 'Todas' : st}
             </button>
           ))}
         </div>
@@ -361,7 +406,7 @@ export const ComprovantesArea: React.FC = () => {
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Buscar nota, prestador ou CNPJ..."
+            placeholder={isAmetaTeam ? 'Buscar solicitação, destino ou atividades...' : 'Buscar nota, prestador ou CNPJ...'}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
@@ -369,78 +414,150 @@ export const ComprovantesArea: React.FC = () => {
         </div>
       </div>
 
-      {/* Notes Grid */}
+      {/* Grid: Ameta Requests or Notes */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        {notasList.length === 0 ? (
-          <div className="col-span-full bg-white rounded-2xl border border-slate-200 p-12 text-center text-xs text-slate-500">
-            Nenhuma nota fiscal encontrada neste filtro.
-          </div>
-        ) : (
-          notasList.map((nota) => {
-            const countComp = comprovantes.filter((c) => c.notaId === nota.id).length;
-            const safeMeta = getSafeProviderMeta(nota.prestadorId);
-            return (
-              <div
-                key={nota.id}
-                className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 flex flex-col justify-between space-y-4 hover:border-teal-400 transition-all"
-              >
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-extrabold text-slate-900 text-base">{nota.numero}</span>
-                    <span
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold ${
-                        nota.status === 'Comprovada'
-                          ? 'bg-teal-100 text-teal-800 border border-teal-200'
-                          : 'bg-amber-100 text-amber-800 border border-amber-200'
-                      }`}
-                    >
-                      {nota.status}
-                    </span>
-                  </div>
-
-                  <div>
-                    <div className="text-sm font-bold text-slate-800">{safeMeta.nome}</div>
-                    <div className="text-xs text-teal-700 font-semibold">{safeMeta.funcao}</div>
-                    <div className="text-xs text-slate-500">{safeMeta.empresa}</div>
-                    <div className="text-[11px] font-mono tabular-nums text-slate-500">
-                      CNPJ: {safeMeta.cnpj}
-                    </div>
-                  </div>
-
-                  <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs space-y-1">
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Valor da Nota:</span>
-                      <span className="font-bold text-slate-900 tabular-nums">
-                        R$ {nota.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+        {isAmetaTeam ? (
+          ametaRequestsList.length === 0 ? (
+            <div className="col-span-full bg-white rounded-2xl border border-slate-200 p-12 text-center text-xs text-slate-500">
+              Nenhuma solicitação de adiantamento encontrada para anexar comprovantes.
+            </div>
+          ) : (
+            ametaRequestsList.map((req) => {
+              const countComp = comprovantes.filter((c) => c.requestId === req.id).length;
+              return (
+                <div
+                  key={req.id}
+                  className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 flex flex-col justify-between space-y-4 hover:border-teal-400 transition-all"
+                >
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-extrabold text-slate-900 text-base">{req.code}</span>
+                      <span
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-bold ${
+                          req.status === 'Finalizado'
+                            ? 'bg-teal-100 text-teal-800 border border-teal-200'
+                            : 'bg-amber-100 text-amber-800 border border-amber-200'
+                        }`}
+                      >
+                        {req.status}
                       </span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Comprovantes anexados:</span>
-                      <span className="font-bold text-teal-700 tabular-nums">{countComp}</span>
+
+                    <div>
+                      <div className="text-sm font-bold text-slate-800">{req.destination}</div>
+                      <div className="text-xs text-teal-700 font-semibold">{req.purpose}</div>
+                      {req.activities && (
+                        <div className="text-xs text-slate-600 line-clamp-2 mt-1">
+                          Atividades: {req.activities}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Valor Adiantamento:</span>
+                        <span className="font-bold text-slate-900 tabular-nums">
+                          R$ {req.amountRequested.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Comprovantes anexados:</span>
+                        <span className="font-bold text-teal-700 tabular-nums">{countComp}</span>
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <button
-                  onClick={() => {
-                    setSelectedNota(nota);
-                    setSelectedFiles([]);
-                    setStagedItems([]);
-                    setValorInput('');
-                    setDescricao('');
-                    setErrorMsg('');
-                    setProgress(0);
-                  }}
-                  className="w-full py-2.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                  <button
+                    onClick={() => {
+                      setSelectedRequest(req);
+                      setSelectedFiles([]);
+                      setStagedItems([]);
+                      setValorInput('');
+                      setDescricao('');
+                      setErrorMsg('');
+                      setProgress(0);
+                    }}
+                    className="w-full py-2.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Camera className="w-4 h-4" />
+                    <span>Abrir Solicitação e Anexar Comprovantes</span>
+                  </button>
+                </div>
+              );
+            })
+          )
+        ) : (
+          notasList.length === 0 ? (
+            <div className="col-span-full bg-white rounded-2xl border border-slate-200 p-12 text-center text-xs text-slate-500">
+              Nenhuma nota fiscal encontrada neste filtro.
+            </div>
+          ) : (
+            notasList.map((nota) => {
+              const countComp = comprovantes.filter((c) => c.notaId === nota.id).length;
+              const safeMeta = getSafeProviderMeta(nota.prestadorId);
+              return (
+                <div
+                  key={nota.id}
+                  className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 flex flex-col justify-between space-y-4 hover:border-teal-400 transition-all"
                 >
-                  <Camera className="w-4 h-4" />
-                  <span>
-                    {canAttach ? 'Abrir Nota e Anexar Comprovantes' : 'Visualizar Comprovantes'}
-                  </span>
-                </button>
-              </div>
-            );
-          })
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-extrabold text-slate-900 text-base">{nota.numero}</span>
+                      <span
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-bold ${
+                          nota.status === 'Comprovada'
+                            ? 'bg-teal-100 text-teal-800 border border-teal-200'
+                            : 'bg-amber-100 text-amber-800 border border-amber-200'
+                        }`}
+                      >
+                        {nota.status}
+                      </span>
+                    </div>
+
+                    <div>
+                      <div className="text-sm font-bold text-slate-800">{safeMeta.nome}</div>
+                      <div className="text-xs text-teal-700 font-semibold">{safeMeta.funcao}</div>
+                      <div className="text-xs text-slate-500">{safeMeta.empresa}</div>
+                      <div className="text-[11px] font-mono tabular-nums text-slate-500">
+                        CNPJ: {safeMeta.cnpj}
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Valor da Nota:</span>
+                        <span className="font-bold text-slate-900 tabular-nums">
+                          R$ {nota.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Comprovantes anexados:</span>
+                        <span className="font-bold text-teal-700 tabular-nums">{countComp}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setSelectedNota(nota);
+                      setSelectedFiles([]);
+                      setStagedItems([]);
+                      setValorInput('');
+                      setDescricao('');
+                      setErrorMsg('');
+                      setProgress(0);
+                    }}
+                    className="w-full py-2.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Camera className="w-4 h-4" />
+                    <span>
+                      {canAttach ? 'Abrir Nota e Anexar Comprovantes' : 'Visualizar Comprovantes'}
+                    </span>
+                  </button>
+                </div>
+              );
+            })
+          )
         )}
       </div>
 
@@ -833,10 +950,10 @@ export const ComprovantesArea: React.FC = () => {
                     </h4>
 
                     <div className="space-y-4 text-sm">
-                      <div className="flex justify-between items-center">
+                       <div className="flex justify-between items-center">
                         <span className="text-slate-400">Valor da Nota:</span>
                         <span className="font-bold text-white tabular-nums">
-                          R$ {noteAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                          R$ {(selectedNota?.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                         </span>
                       </div>
 
@@ -896,6 +1013,476 @@ export const ComprovantesArea: React.FC = () => {
                       <div className="w-full py-3 bg-teal-900/60 border border-teal-700 text-teal-300 rounded-xl text-xs font-bold flex items-center justify-center gap-2">
                         <CheckCircle2 className="w-4 h-4" />
                         <span>{notaComprovantes.length} comprovante(s) enviado(s)</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Selected Request Modal for Vistoriador AMETA */}
+      {selectedRequest && (
+        <div className="fixed inset-0 z-50 bg-black/60 p-3 sm:p-4 flex items-center justify-center backdrop-blur-xs">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-6xl max-h-[94vh] flex flex-col overflow-hidden">
+            <div className="bg-slate-900 text-white px-4 sm:px-6 py-4 flex items-center justify-between gap-2 shrink-0">
+              <div className="min-w-0">
+                <h3 className="font-extrabold text-base sm:text-lg truncate">
+                  Solicitação {selectedRequest.code} • {selectedRequest.destination}
+                </h3>
+                <p className="text-xs text-teal-300 truncate">
+                  Finalidade: {selectedRequest.purpose}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {selectedRequest.status !== 'Finalizado' && (
+                  <button
+                    onClick={handleFinalizeActivity}
+                    className="px-3.5 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Finalizar Atividade</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedRequest(null)}
+                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 sm:p-6 overflow-y-auto space-y-5 sm:space-y-6 text-xs flex-1 bg-slate-50/50">
+              {/* Request Summary */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3 shadow-xs">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <span className="font-extrabold text-slate-800 uppercase tracking-wider">
+                    Dados da Solicitação de Adiantamento
+                  </span>
+                  <span
+                    className={`inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-0.5 rounded-md ${
+                      selectedRequest.status === 'Finalizado'
+                        ? 'bg-teal-100 text-teal-800 border border-teal-200'
+                        : 'bg-amber-100 text-amber-800 border border-amber-200'
+                    }`}
+                  >
+                    {selectedRequest.status}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <span className="text-slate-500 block">Valor Solicitado:</span>
+                    <span className="font-extrabold text-slate-900 text-sm tabular-nums">
+                      R$ {selectedRequest.amountRequested.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Período:</span>
+                    <span className="font-bold text-slate-800">
+                      {new Date(selectedRequest.startDate).toLocaleDateString('pt-BR')} a {new Date(selectedRequest.endDate).toLocaleDateString('pt-BR')}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Destino:</span>
+                    <span className="font-bold text-slate-800">{selectedRequest.destination}</span>
+                  </div>
+                </div>
+                {selectedRequest.activities && (
+                  <div>
+                    <span className="text-slate-500 block">Atividades Planejadas:</span>
+                    <p className="text-slate-800 mt-0.5">{selectedRequest.activities}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 space-y-6">
+                  {selectedRequest.status !== 'Finalizado' && (
+                    <form
+                      onSubmit={handleAddToList}
+                      className="bg-white rounded-2xl border border-slate-200 shadow-xs p-4 sm:p-6 space-y-4"
+                    >
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h4 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                          <Plus className="w-5 h-5 text-teal-600" />
+                          <span>Adicionar Comprovante / Recibo</span>
+                        </h4>
+                        <span className="text-[11px] font-semibold text-teal-800">
+                          PDF, JPG ou PNG • Máx. 10 MB
+                        </span>
+                      </div>
+
+                      {errorMsg && (
+                        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 flex items-center gap-2 font-semibold">
+                          <AlertCircle className="w-4 h-4 shrink-0" />
+                          <span>{errorMsg}</span>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                        <div>
+                          <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                            Categoria <span className="text-red-500">*</span>
+                          </label>
+                          <select
+                            value={categoria}
+                            onChange={(e) => setCategoria(e.target.value as ExpenseCategory)}
+                            className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800"
+                          >
+                            <option value="Hospedagem">Hospedagem</option>
+                            <option value="Combustível">Combustível</option>
+                            <option value="Alimentação">Alimentação</option>
+                            <option value="Almoço">Almoço</option>
+                            <option value="Pedágios">Pedágios</option>
+                            <option value="Estacionamento">Estacionamento</option>
+                            <option value="Outras despesas">Outras despesas</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                            Data do Comprovante <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="date"
+                            required
+                            value={dataServico}
+                            onChange={(e) => setDataServico(e.target.value)}
+                            className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                            Valor (R$) <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0.01"
+                            required
+                            placeholder="150.00"
+                            value={valorInput}
+                            onChange={(e) => setValorInput(e.target.value)}
+                            className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                            Arquivo do Comprovante <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="file"
+                            multiple
+                            accept=".pdf,.jpg,.jpeg,.png"
+                            onChange={handleFilesSelected}
+                            className="w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 cursor-pointer bg-slate-50 border border-slate-200 rounded-xl p-1.5"
+                          />
+                          {selectedFiles.length > 0 && (
+                            <span className="text-[10px] text-teal-700 font-semibold mt-1 block">
+                              Selecionado(s): {selectedFiles.map((f) => f.file.name).join(', ')}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                            Descrição do Gasto <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Ex: Almoço equipe vistoria"
+                            value={descricao}
+                            onChange={(e) => setDescricao(e.target.value)}
+                            className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                          />
+                        </div>
+
+                        {selectedFiles.length > 0 && (
+                          <div className="sm:col-span-2 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            {selectedFiles.map((item, idx) => (
+                              <div
+                                key={idx}
+                                className="p-2 rounded-xl border border-slate-200 bg-slate-50 relative"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSelectedFiles((prev) => prev.filter((_, i) => i !== idx))
+                                  }
+                                  className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center"
+                                >
+                                  ✕
+                                </button>
+                                {item.file.type.startsWith('image/') && item.previewUrl ? (
+                                  <img
+                                    src={item.previewUrl}
+                                    alt={item.file.name}
+                                    className="w-full h-16 object-cover rounded-lg mb-1"
+                                  />
+                                ) : (
+                                  <div className="w-full h-16 rounded-lg bg-slate-200 flex items-center justify-center mb-1">
+                                    <FileText className="w-6 h-6 text-slate-600" />
+                                  </div>
+                                )}
+                                <p className="text-[10px] font-bold text-slate-800 truncate">
+                                  {item.file.name}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="sm:col-span-2 flex flex-wrap justify-end gap-2.5 pt-1">
+                          <button
+                            type="submit"
+                            disabled={uploading}
+                            className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm transition-colors"
+                          >
+                            <Plus className="w-4 h-4" />
+                            <span>Adicionar à Lista</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSendAll}
+                            disabled={uploading || (stagedItems.length === 0 && selectedFiles.length === 0)}
+                            className="px-5 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-md transition-colors"
+                          >
+                            <Upload className="w-4 h-4" />
+                            <span>
+                              {uploading
+                                ? 'Enviando...'
+                                : stagedItems.length > 0
+                                  ? `Enviar Comprovantes (${stagedItems.length})`
+                                  : 'Enviar Comprovante(s)'}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {uploading && (
+                        <div className="space-y-1 pt-2">
+                          <div className="flex justify-between text-[11px] font-bold text-teal-800">
+                            <span>Enviando comprovantes...</span>
+                            <span className="tabular-nums">{progress}%</span>
+                          </div>
+                          <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+                            <div
+                              className="bg-teal-600 h-2.5 transition-all"
+                              style={{ width: `${progress}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </form>
+                  )}
+
+                  {/* Comprovantes Table */}
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                    <div className="p-5 border-b border-slate-200 flex items-center justify-between">
+                      <h4 className="font-bold text-slate-900 text-sm">
+                        Comprovantes Anexados ({requestComprovantes.length + stagedItems.length})
+                      </h4>
+                      {stagedItems.length > 0 && (
+                        <span className="px-2.5 py-1 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold">
+                          {stagedItems.length} pendente(s) de envio
+                        </span>
+                      )}
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 text-slate-500 uppercase font-bold tracking-wider border-b border-slate-200">
+                            <th className="py-3 px-4">Categoria</th>
+                            <th className="py-3 px-4">Data</th>
+                            <th className="py-3 px-4">Descrição</th>
+                            <th className="py-3 px-4">Valor</th>
+                            <th className="py-3 px-4 text-right">Ação</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {requestComprovantes.length === 0 && stagedItems.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="py-8 text-center text-slate-500">
+                                Nenhum comprovante anexado ainda.
+                              </td>
+                            </tr>
+                          ) : (
+                            <>
+                              {stagedItems.map((item) => (
+                                <tr key={item.localId} className="bg-amber-50/40 hover:bg-amber-50/70">
+                                  <td className="py-3 px-4 font-bold text-slate-800">
+                                    {item.categoria}
+                                    <span className="block text-[10px] font-semibold text-amber-700">
+                                      Não enviado
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-600 tabular-nums">
+                                    {new Date(item.data).toLocaleDateString('pt-BR')}
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-700">
+                                    <span className="block">{item.descricao}</span>
+                                    <span className="text-[10px] text-slate-400">{item.file.name}</span>
+                                  </td>
+                                  <td className="py-3 px-4 font-bold text-slate-900 tabular-nums">
+                                    R$ {item.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                                  </td>
+                                  <td className="py-3 px-4 text-right">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleViewStaged(item)}
+                                        title="Visualizar Comprovante"
+                                        className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white transition-colors"
+                                      >
+                                        <Eye className="w-3.5 h-3.5 text-teal-400" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveStaged(item.localId)}
+                                        title="Remover da lista"
+                                        className="text-red-500 hover:text-red-700 p-1 rounded transition-colors"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                              {requestComprovantes.map((comp) => (
+                                <tr key={comp.id} className="hover:bg-slate-50">
+                                  <td className="py-3 px-4 font-bold text-slate-800">
+                                    {comp.categoria || 'Comprovante'}
+                                    <span className="block text-[10px] font-semibold text-teal-700">
+                                      Enviado
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-600 tabular-nums">
+                                    {new Date(comp.data).toLocaleDateString('pt-BR')}
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-700">
+                                    <span className="block">{comp.descricao}</span>
+                                    <span className="text-[10px] text-slate-400">
+                                      {comp.arquivoNome || comp.arquivoPath} • {comp.criadoPorNome}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4 font-bold text-slate-900 tabular-nums">
+                                    {comp.valor !== undefined
+                                      ? `R$ ${comp.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+                                      : '-'}
+                                  </td>
+                                  <td className="py-3 px-4 text-right">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleViewComprovante(comp)}
+                                        title="Visualizar Comprovante"
+                                        className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white transition-colors"
+                                      >
+                                        <Eye className="w-3.5 h-3.5 text-teal-400" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDownloadComprovante(comp)}
+                                        title="Baixar Arquivo"
+                                        className="p-1.5 rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-800 transition-colors"
+                                      >
+                                        <Download className="w-3.5 h-3.5" />
+                                      </button>
+                                      {isAdmin && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            deleteComprovante(comp.id);
+                                            showToast('Comprovante excluído.');
+                                          }}
+                                          title="Excluir"
+                                          className="text-red-500 hover:text-red-700 p-1 rounded transition-colors"
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right col: Financial Summary for Request */}
+                <div className="space-y-6">
+                  <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-xl space-y-6">
+                    <h4 className="text-base font-extrabold flex items-center gap-2 border-b border-slate-800 pb-3">
+                      <Calculator className="w-5 h-5 text-teal-400" />
+                      <span>Resumo Financeiro</span>
+                    </h4>
+
+                    <div className="space-y-4 text-sm">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Valor Adiantamento:</span>
+                        <span className="font-bold text-white tabular-nums">
+                          R$ {selectedRequest.amountRequested.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Total Comprovantes:</span>
+                        <span className="font-bold text-teal-400 tabular-nums">
+                          R$ {totalCombinedAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div className="pt-4 border-t border-slate-800">
+                        <span className="text-slate-400 text-xs block mb-1">
+                          Balanço / Saldo:
+                        </span>
+                        {balanceDiff > 0 ? (
+                          <div className="bg-amber-950/60 border border-amber-800 text-amber-300 p-3.5 rounded-xl text-xs">
+                            <strong className="block text-sm font-bold mb-1">
+                              Saldo a Devolver / Restante:
+                            </strong>
+                            R$ {balanceDiff.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                          </div>
+                        ) : balanceDiff < 0 ? (
+                          <div className="bg-indigo-950/60 border border-indigo-800 text-indigo-300 p-3.5 rounded-xl text-xs">
+                            <strong className="block text-sm font-bold mb-1">
+                              Reembolso Devido:
+                            </strong>
+                            R$ {Math.abs(balanceDiff).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                          </div>
+                        ) : (
+                          <div className="bg-teal-950/60 border border-teal-800 text-teal-300 p-3.5 rounded-xl text-xs font-bold">
+                            Contas zeradas e conferidas!
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {selectedRequest.status !== 'Finalizado' && (
+                      <button
+                        type="button"
+                        onClick={handleFinalizeActivity}
+                        className="w-full py-3 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-teal-900/40 transition-all flex items-center justify-center gap-2"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Finalizar Atividade</span>
+                      </button>
+                    )}
+
+                    {selectedRequest.status === 'Finalizado' && (
+                      <div className="w-full py-3 bg-teal-900/60 border border-teal-700 text-teal-300 rounded-xl text-xs font-bold flex items-center justify-center gap-2">
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Atividade Finalizada</span>
                       </div>
                     )}
                   </div>
