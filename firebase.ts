@@ -1,12 +1,30 @@
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import { getFirestore, initializeFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+/**
+ * `ignoreUndefinedProperties` evita o erro "Unsupported field value: undefined" do Firestore.
+ * Sem isso, qualquer objeto com um campo opcional vazio (ex.: `comment: undefined`) é recusado
+ * e o dado simplesmente não é salvo.
+ */
+function createDb() {
+  try {
+    return initializeFirestore(
+      app,
+      { ignoreUndefinedProperties: true },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    // Já inicializado (ex.: recarga a quente do Vite) — reaproveita a instância existente.
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createDb();
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
