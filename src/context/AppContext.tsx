@@ -1,8 +1,17 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  updatePassword,
+  signOut,
+} from 'firebase/auth';
 import {
   User,
   AdvanceRequest,
+  AuditLogEntry,
   RequestStatus,
   InvoiceData,
   PaymentData,
@@ -13,17 +22,8 @@ import {
   NotaFiscalEquipe,
   ComprovanteServico,
   AuditoriaEntry,
-  UserRole,
 } from '../types';
-import {
-  INITIAL_USERS,
-  INITIAL_REQUESTS,
-  INITIAL_CADASTROS,
-  INITIAL_NOTAS_EQUIPE,
-  INITIAL_COMPROVANTES,
-  INITIAL_AUDITORIA,
-} from '../data/mockData';
-import { auth, googleProvider } from '../firebase';
+import { auth, googleProvider, getProvisioningAuth } from '../firebase';
 import {
   atualizarNotaFirestore,
   atualizarStatusCadastroFirestore,
@@ -34,13 +34,20 @@ import {
   excluirNotaFirestore,
   fetchUserProfileFirestore,
   getAuthenticatedDownloadUrl,
+  markFirstLoginDoneFirestore,
   registrarAuditoriaFirestore,
   subscribeTeamCollections,
   uploadAuthenticatedFile,
-  upsertUserFirestore,
+  uploadRequestFiles,
   upsertRequestFirestore,
+  upsertUserFirestore,
 } from '../services/firebaseService';
-import { readFileAsDataUrl } from '../utils/fileHelpers';
+
+/** E-mail do administrador inicial (precisa coincidir com o das regras do Firestore/Storage). */
+const BOOTSTRAP_ADMIN_EMAIL = 'blabluki@gmail.com';
+const DEFAULT_PASSWORD = 'ameta123';
+
+type AuthResult = { ok: boolean; error?: string };
 
 interface AppContextType {
   users: User[];
@@ -50,14 +57,19 @@ interface AppContextType {
   comprovantes: ComprovanteServico[];
   auditoria: AuditoriaEntry[];
   currentUser: User | null;
-  firebaseAuthenticated: boolean;
-  login: (email: string, pass: string) => boolean;
-  loginWithGoogle: () => Promise<{ ok: boolean; error?: string }>;
+  /** false enquanto o Firebase ainda está verificando se existe uma sessão ativa. */
+  authReady: boolean;
+  /** Mensagem de erro de sincronização/permissão com o Firebase (null quando está tudo certo). */
+  syncError: string | null;
+  dismissSyncError: () => void;
+  login: (email: string, pass: string) => Promise<AuthResult>;
+  loginWithGoogle: () => Promise<AuthResult>;
   logout: () => void;
-  changePassword: (newPass: string) => void;
+  changePassword: (newPass: string) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
   activeRole: 'operador' | 'financeiro';
 
-  // Existing Advance Request Actions
+  // Advance Request Actions
   createRequest: (data: {
     destination: string;
     startDate: string;
@@ -88,14 +100,14 @@ interface AppContextType {
   finalizeActivity: (requestId: string) => void;
 
   // User Management
-  addUser: (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => void;
+  addUser: (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => Promise<void>;
   updateUser: (
     userId: string,
     updates: Partial<
-      Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active' | 'password' | 'isFirstLogin'>
+      Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active' | 'isFirstLogin'>
     >
-  ) => void;
-  toggleUserStatus: (userId: string) => void;
+  ) => Promise<void>;
+  toggleUserStatus: (userId: string) => Promise<void>;
 
   // Public Cadastro & Teams Workflow
   createCadastro: (
@@ -152,187 +164,132 @@ interface AppContextType {
   ) => Promise<void>;
   resolveAuthenticatedStorageUrl: (arquivoPath?: string) => Promise<string | null>;
 
-  // Notifications
+  // Notifications (apenas em memória: avisos da sessão atual)
   notifications: Array<{ id: string; title: string; message: string; date: string; read: boolean }>;
   markNotificationAsRead: (id: string) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const LEGACY_DEMO_USER_IDS = new Set([
-  'op-1',
-  'op-2',
-  'op-3',
-  'op-4',
-  'op-5',
-  'fin-1',
-  'fin-2',
-  'nota-1',
-  'ameta-1',
-]);
+/** Texto legível a partir de qualquer erro (inclui o JSON lançado por handleFirestoreError). */
+function errorText(err: unknown): string {
+  if (err instanceof Error) {
+    let message = err.message;
+    try {
+      const parsed = JSON.parse(err.message) as { error?: string };
+      if (parsed && typeof parsed.error === 'string') message = parsed.error;
+    } catch {
+      // não era JSON: usa a mensagem original
+    }
+    if (/permission|insufficient/i.test(message)) {
+      return 'sem permissão (regras de segurança do Firebase negaram a operação)';
+    }
+    return message;
+  }
+  return String(err);
+}
 
-const LEGACY_DEMO_REQUEST_IDS = new Set([
-  'req-001',
-  'req-002',
-  'req-003',
-  'req-004',
-  'req-005',
-  'req-006',
-  'req-007',
-  'req-008',
-  'req-009',
-  'req-010',
-]);
+function friendlyAuthError(err: unknown): string {
+  const code = (err as { code?: string } | null)?.code ?? '';
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+    case 'auth/invalid-email':
+      return 'E-mail ou senha inválidos.';
+    case 'auth/too-many-requests':
+      return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
+    case 'auth/operation-not-allowed':
+      return 'Este método de login não está ativado no Firebase (Console → Authentication → Método de login).';
+    case 'auth/unauthorized-domain':
+      return 'Este endereço do site não está autorizado no Firebase (Console → Authentication → Configurações → Domínios autorizados).';
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return 'Login com Google cancelado.';
+    case 'auth/popup-blocked':
+      return 'O navegador bloqueou a janela do Google. Libere os pop-ups e tente de novo.';
+    case 'auth/email-already-in-use':
+      return 'Já existe uma conta no Firebase Authentication com este e-mail. Use a redefinição de senha ou remova a conta antiga no console do Firebase.';
+    case 'auth/weak-password':
+      return 'A senha deve ter pelo menos 6 caracteres.';
+    case 'auth/requires-recent-login':
+      return 'Por segurança, saia do sistema, entre novamente e repita a operação.';
+    case 'auth/network-request-failed':
+      return 'Falha de rede ao falar com o Firebase.';
+    default:
+      return err instanceof Error ? err.message : 'Falha na autenticação.';
+  }
+}
 
-const LEGACY_DEMO_CADASTRO_CNPJS = new Set([
-  '24.680.135/0001-40',
-  '38.912.456/0001-05',
-  '45.123.987/0001-88',
-]);
-
-const LEGACY_DEMO_CADASTRO_NAMES = new Set([
-  'Marcos Vinícius Oliveira',
-  'Juliana Costa Ferreira',
-  'Rafael Almeida Souza',
-]);
-
-const LEGACY_DEMO_AUTHOR_NAMES = new Set([
-  'Paulo Notas',
-  'Roberto Gerente',
-  'Carlos Silva',
-  'Fernanda Ameta',
-]);
-
-const isLegacyDemoCadastro = (c: CadastroPrestador): boolean =>
-  /^cad-0*\d{1,3}$/.test(c.id) ||
-  LEGACY_DEMO_CADASTRO_CNPJS.has(c.cnpj) ||
-  LEGACY_DEMO_CADASTRO_NAMES.has(c.nome);
-
-const isLegacyDemoNota = (n: NotaFiscalEquipe): boolean =>
-  /^nota-(eq-)?0*\d{1,3}$/.test(n.id) ||
-  /^cad-0*\d{1,3}$/.test(n.prestadorId) ||
-  LEGACY_DEMO_CADASTRO_CNPJS.has(n.prestadorCnpj) ||
-  LEGACY_DEMO_CADASTRO_NAMES.has(n.prestadorNome) ||
-  LEGACY_DEMO_AUTHOR_NAMES.has(n.criadoPorNome);
-
-const isLegacyDemoComprovante = (comp: ComprovanteServico): boolean =>
-  /^comp-0*\d{1,3}$/.test(comp.id) ||
-  (comp.notaId ? /^nota-(eq-)?0*\d{1,3}$/.test(comp.notaId) : false) ||
-  (comp.prestadorId ? /^cad-0*\d{1,3}$/.test(comp.prestadorId) : false) ||
-  LEGACY_DEMO_AUTHOR_NAMES.has(comp.criadoPorNome);
-
-const isLegacyDemoAuditoria = (a: AuditoriaEntry): boolean =>
-  /^aud-0*\d{1,3}$/.test(a.id) ||
-  LEGACY_DEMO_USER_IDS.has(a.autorUid) ||
-  LEGACY_DEMO_AUTHOR_NAMES.has(a.autorNome) ||
-  /^cad-0*\d{1,3}$/.test(a.entidadeId) ||
-  /^nota-(eq-)?0*\d{1,3}$/.test(a.entidadeId) ||
-  /^comp-0*\d{1,3}$/.test(a.entidadeId);
+/** Solicitações de vistoriador AMETA nunca passam por NF: normaliza status antigos. */
+function normalizeRequest(r: AdvanceRequest): AdvanceRequest {
+  const isAmeta = r.requesterRole === 'vistoria_ameta';
+  if (
+    isAmeta &&
+    (r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal')
+  ) {
+    return { ...r, status: 'Aguardando comprovante' as RequestStatus };
+  }
+  return r;
+}
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem('ameta_users');
-    if (!saved) return INITIAL_USERS;
-    const parsed: User[] = JSON.parse(saved);
-    const cleaned = parsed.filter((u) => !LEGACY_DEMO_USER_IDS.has(u.id));
-    if (cleaned.length === 0) return INITIAL_USERS;
-    const existingEmails = new Set(cleaned.map((u) => u.email.toLowerCase()));
-    const missingInitial = INITIAL_USERS.filter(
-      (u) => !existingEmails.has(u.email.toLowerCase())
-    );
-    return missingInitial.length > 0 ? [...cleaned, ...missingInitial] : cleaned;
-  });
-
-  const [requests, setRequests] = useState<AdvanceRequest[]>(() => {
-    const saved = localStorage.getItem('ameta_requests');
-    if (!saved) return INITIAL_REQUESTS;
-    const parsed: AdvanceRequest[] = JSON.parse(saved);
-    return parsed
-      .filter((r) => !LEGACY_DEMO_REQUEST_IDS.has(r.id))
-      .map((r) => {
-        const isAmeta = r.requesterRole === 'vistoria_ameta';
-        if (
-          isAmeta &&
-          (r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal')
-        ) {
-          return { ...r, status: 'Aguardando comprovante' as RequestStatus };
-        }
-        return r;
-      });
-  });
-
-  const [cadastros, setCadastros] = useState<CadastroPrestador[]>(() => {
-    const saved = localStorage.getItem('ameta_cadastros');
-    if (!saved) return INITIAL_CADASTROS;
-    const parsed: CadastroPrestador[] = JSON.parse(saved);
-    return parsed.filter((c) => !isLegacyDemoCadastro(c));
-  });
-
-  const [notasEquipe, setNotasEquipe] = useState<NotaFiscalEquipe[]>(() => {
-    const saved = localStorage.getItem('ameta_notas_equipe');
-    if (!saved) return INITIAL_NOTAS_EQUIPE;
-    const parsed: NotaFiscalEquipe[] = JSON.parse(saved);
-    return parsed.filter((n) => !isLegacyDemoNota(n));
-  });
-
-  const [comprovantes, setComprovantes] = useState<ComprovanteServico[]>(() => {
-    const saved = localStorage.getItem('ameta_comprovantes');
-    if (!saved) return INITIAL_COMPROVANTES;
-    const parsed: ComprovanteServico[] = JSON.parse(saved);
-    return parsed.filter((comp) => !isLegacyDemoComprovante(comp));
-  });
-
-  const [auditoria, setAuditoria] = useState<AuditoriaEntry[]>(() => {
-    const saved = localStorage.getItem('ameta_auditoria');
-    if (!saved) return INITIAL_AUDITORIA;
-    const parsed: AuditoriaEntry[] = JSON.parse(saved);
-    return parsed.filter((a) => !isLegacyDemoAuditoria(a));
-  });
-
-  const [currentUserId, setCurrentUserId] = useState<string | null>(() => {
-    const savedId = localStorage.getItem('ameta_current_user_id');
-    if (!savedId || LEGACY_DEMO_USER_IDS.has(savedId)) return null;
-    return savedId;
-  });
-
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const [firebaseAuthenticated, setFirebaseAuthenticated] = useState(false);
-
-  const demoUser = users.find((u) => u.id === currentUserId) || null;
-  const currentUser = firebaseAuthenticated ? firebaseUser : demoUser;
-  const activeRole: 'operador' | 'financeiro' =
-    currentUser?.role === 'operador' ? 'operador' : 'financeiro';
-
+  const [users, setUsers] = useState<User[]>([]);
+  const [requests, setRequests] = useState<AdvanceRequest[]>([]);
+  const [cadastros, setCadastros] = useState<CadastroPrestador[]>([]);
+  const [notasEquipe, setNotasEquipe] = useState<NotaFiscalEquipe[]>([]);
+  const [comprovantes, setComprovantes] = useState<ComprovanteServico[]>([]);
+  const [auditoria, setAuditoria] = useState<AuditoriaEntry[]>([]);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<
     Array<{ id: string; title: string; message: string; date: string; read: boolean }>
   >([]);
 
-  // Listen to Firebase Auth state and subscribe to Firestore when signed in via Firebase
-  useEffect(() => {
-    let unsubFirestore: (() => void) | null = null;
-    const unsubAuth = onAuthStateChanged(auth, async (fbAuthUser) => {
-      if (unsubFirestore) {
-        unsubFirestore();
-        unsubFirestore = null;
-      }
+  const activeRole: 'operador' | 'financeiro' =
+    currentUser?.role === 'operador' ? 'operador' : 'financeiro';
 
-      if (!fbAuthUser) {
-        setFirebaseAuthenticated(false);
-        setFirebaseUser(null);
+  const dismissSyncError = () => setSyncError(null);
+
+  const reportError = (message: string, err: unknown) => {
+    console.error(message, err);
+    setSyncError(`${message}: ${errorText(err)}`);
+  };
+
+  // Sessão do Firebase Auth → perfil no Firestore → escutas em tempo real
+  useEffect(() => {
+    let unsubData: (() => void) | null = null;
+    const stopData = () => {
+      if (unsubData) {
+        unsubData();
+        unsubData = null;
+      }
+    };
+
+    const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
+      stopData();
+
+      if (!fbUser) {
+        setCurrentUser(null);
+        setUsers([]);
+        setRequests([]);
+        setCadastros([]);
+        setNotasEquipe([]);
+        setComprovantes([]);
+        setAuditoria([]);
+        setAuthReady(true);
         return;
       }
 
       try {
-        let profile = await fetchUserProfileFirestore(fbAuthUser.uid);
-        if (
-          !profile &&
-          fbAuthUser.email === 'blabluki@gmail.com' &&
-          fbAuthUser.emailVerified
-        ) {
+        let profile = await fetchUserProfileFirestore(fbUser.uid);
+
+        if (!profile && fbUser.email === BOOTSTRAP_ADMIN_EMAIL && fbUser.emailVerified) {
           const adminBootstrap: User = {
-            id: fbAuthUser.uid,
-            name: fbAuthUser.displayName || 'Administrador AMETA',
-            email: fbAuthUser.email,
+            id: fbUser.uid,
+            name: fbUser.displayName || 'Administrador AMETA',
+            email: fbUser.email,
             cpfCnpj: '',
             phone: '',
             role: 'admin',
@@ -345,156 +302,101 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           profile = adminBootstrap;
         }
 
-        if (profile && profile.active) {
-          setFirebaseUser(profile);
-          setFirebaseAuthenticated(true);
-          unsubFirestore = subscribeTeamCollections({
-            isAdmin: profile.role === 'admin' || profile.role === 'financeiro',
-            onCadastros: setCadastros,
-            onNotas: setNotasEquipe,
-            onComprovantes: setComprovantes,
-            onAuditoria: setAuditoria,
-            onRequests: (fbRequests) => {
-              const cleaned = fbRequests
-                .filter((r) => !LEGACY_DEMO_REQUEST_IDS.has(r.id))
-                .map((r) => {
-                  const isAmeta = r.requesterRole === 'vistoria_ameta';
-                  if (
-                    isAmeta &&
-                    (r.status === 'Em análise financeira' || r.status === 'Autorizado emitir Nota Fiscal')
-                  ) {
-                    return { ...r, status: 'Aguardando comprovante' as RequestStatus };
-                  }
-                  return r;
-                });
-              setRequests(cleaned);
-            },
-            onUsers: (fbUsers) => {
-              if (fbUsers.length > 0) setUsers(fbUsers);
-            },
-          });
-        } else {
-          setFirebaseAuthenticated(false);
-          setFirebaseUser(null);
+        if (!profile) {
+          setSyncError(
+            'Conta autenticada, mas ainda sem acesso liberado. Peça ao Administrador para cadastrar este e-mail em Usuários.'
+          );
+          await signOut(auth);
+          return;
         }
+
+        if (!profile.active) {
+          setSyncError('Este usuário está desativado no sistema.');
+          await signOut(auth);
+          return;
+        }
+
+        setCurrentUser(profile);
+        unsubData = subscribeTeamCollections({
+          role: profile.role,
+          onCadastros: setCadastros,
+          onNotas: setNotasEquipe,
+          onComprovantes: setComprovantes,
+          onAuditoria: setAuditoria,
+          onRequests: (items) => setRequests(items.map(normalizeRequest)),
+          onUsers: setUsers,
+          onError: (name, err) =>
+            reportError(`Não foi possível ler "${name}" do Firebase`, err),
+        });
       } catch (err) {
-        console.error('Erro ao carregar perfil Firebase:', err);
+        reportError('Não foi possível carregar seu perfil no Firebase', err);
+        await signOut(auth).catch(() => {});
+      } finally {
+        setAuthReady(true);
       }
     });
 
     return () => {
       unsubAuth();
-      if (unsubFirestore) unsubFirestore();
+      stopData();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem('ameta_users', JSON.stringify(users));
-  }, [users]);
-
-  useEffect(() => {
-    localStorage.setItem('ameta_requests', JSON.stringify(requests));
-  }, [requests]);
-
-  useEffect(() => {
-    if (!firebaseAuthenticated) {
-      localStorage.setItem('ameta_cadastros', JSON.stringify(cadastros));
-    }
-  }, [cadastros, firebaseAuthenticated]);
-
-  useEffect(() => {
-    if (!firebaseAuthenticated) {
-      localStorage.setItem('ameta_notas_equipe', JSON.stringify(notasEquipe));
-    }
-  }, [notasEquipe, firebaseAuthenticated]);
-
-  useEffect(() => {
-    if (!firebaseAuthenticated) {
-      localStorage.setItem('ameta_comprovantes', JSON.stringify(comprovantes));
-    }
-  }, [comprovantes, firebaseAuthenticated]);
-
-  useEffect(() => {
-    if (!firebaseAuthenticated) {
-      localStorage.setItem('ameta_auditoria', JSON.stringify(auditoria));
-    }
-  }, [auditoria, firebaseAuthenticated]);
-
-  useEffect(() => {
-    if (currentUserId) {
-      localStorage.setItem('ameta_current_user_id', currentUserId);
-    } else {
-      localStorage.removeItem('ameta_current_user_id');
-    }
-  }, [currentUserId]);
-
-  const login = (email: string, pass: string): boolean => {
-    const found = users.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase() && u.active
-    );
-    if (!found) return false;
-    const userPass = found.password || 'ameta123';
-    if (userPass === pass) {
-      setCurrentUserId(found.id);
-      return true;
-    }
-    return false;
-  };
-
-  const loginWithGoogle = async (): Promise<{ ok: boolean; error?: string }> => {
+  // ==================== AUTENTICAÇÃO ====================
+  const login = async (email: string, pass: string): Promise<AuthResult> => {
     try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      const profile = await fetchUserProfileFirestore(cred.user.uid);
-      const isBootstrapAdmin =
-        cred.user.email === 'blabluki@gmail.com' && cred.user.emailVerified;
-      if (!profile && !isBootstrapAdmin) {
-        await signOut(auth);
-        return {
-          ok: false,
-          error:
-            'Conta Google autenticada, mas ainda sem acesso liberado pelo Administrador em Usuários.',
-        };
-      }
-      if (profile && !profile.active) {
-        await signOut(auth);
-        return { ok: false, error: 'Este usuário está desativado no sistema.' };
-      }
+      setSyncError(null);
+      await signInWithEmailAndPassword(auth, email.trim(), pass);
       return { ok: true };
     } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao autenticar com Google.',
-      };
+      return { ok: false, error: friendlyAuthError(err) };
+    }
+  };
+
+  const loginWithGoogle = async (): Promise<AuthResult> => {
+    try {
+      setSyncError(null);
+      await signInWithPopup(auth, googleProvider);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: friendlyAuthError(err) };
     }
   };
 
   const logout = () => {
-    setCurrentUserId(null);
-    if (auth.currentUser) {
-      signOut(auth).catch(() => {});
-    }
+    signOut(auth).catch((err) => console.error('Erro ao sair:', err));
   };
 
-  const changePassword = (newPass: string) => {
-    if (!currentUser) return;
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return { ...u, password: newPass, isFirstLogin: false };
-        }
-        return u;
-      })
-    );
-    if (firebaseAuthenticated && firebaseUser) {
-      upsertUserFirestore({ ...firebaseUser, isFirstLogin: false }).catch(console.error);
-      setFirebaseUser({ ...firebaseUser, isFirstLogin: false });
+  const changePassword = async (newPass: string): Promise<void> => {
+    const fbUser = auth.currentUser;
+    if (!fbUser || !currentUser) throw new Error('Usuário não autenticado.');
+    try {
+      await updatePassword(fbUser, newPass);
+    } catch (err) {
+      throw new Error(friendlyAuthError(err));
     }
+    try {
+      await markFirstLoginDoneFirestore(currentUser.id);
+    } catch (err) {
+      throw new Error(errorText(err));
+    }
+    setCurrentUser({ ...currentUser, isFirstLogin: false });
     addNotification('Senha Alterada', 'Sua senha foi alterada com sucesso.');
   };
 
+  const sendPasswordReset = async (email: string): Promise<void> => {
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+    } catch (err) {
+      throw new Error(friendlyAuthError(err));
+    }
+  };
+
+  // ==================== NOTIFICAÇÕES / AUDITORIA ====================
   const addNotification = (title: string, message: string) => {
     const newNotif = {
-      id: 'notif-' + Date.now(),
+      id: 'notif-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5),
       title,
       message,
       date: new Date().toISOString().replace('T', ' ').substring(0, 16),
@@ -514,19 +416,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     detalhes?: string
   ) => {
     if (!currentUser) return;
-    const entry: AuditoriaEntry = {
-      id: 'aud-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5),
-      acao,
-      entidade,
-      entidadeId,
-      detalhes,
-      autorUid: currentUser.id,
-      autorNome: currentUser.name,
-      autorRole: currentUser.role,
-      criadoEm: new Date().toISOString(),
-    };
-    setAuditoria((prev) => [entry, ...prev]);
-    if (firebaseAuthenticated) {
+    try {
       await registrarAuditoriaFirestore({
         acao,
         entidade,
@@ -536,43 +426,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         autorNome: currentUser.name,
         autorRole: currentUser.role,
       });
+    } catch (err) {
+      reportError('Não foi possível registrar a auditoria no Firebase', err);
     }
   };
 
-  // ==================== EXISTING ADVANCE REQUEST ACTIONS ====================
-  const logAction = (
-    requestId: string,
-    title: string,
-    comment?: string,
-    statusBefore?: RequestStatus,
-    statusAfter?: RequestStatus
-  ) => {
-    if (!currentUser) return;
+  // ==================== SOLICITAÇÕES DE ADIANTAMENTO ====================
+  /**
+   * Grava uma solicitação no Firebase: mostra a mudança na tela na hora e, em seguida,
+   * envia os anexos ao Storage e salva o documento no Firestore.
+   * Se algo falhar, o erro aparece no aviso vermelho do topo (syncError).
+   */
+  const persistRequest = async (updated: AdvanceRequest): Promise<void> => {
     setRequests((prev) =>
-      prev.map((req) => {
-        if (req.id !== requestId) return req;
-        const newEntry = {
-          id: 'h-' + Date.now() + Math.random().toString(36).substr(2, 4),
-          date: new Date().toISOString(),
-          authorId: currentUser.id,
-          authorName: currentUser.name,
-          authorRole: currentUser.role,
-          title,
-          comment,
-          statusBefore,
-          statusAfter,
-        };
-        const updated: AdvanceRequest = {
-          ...req,
-          status: statusAfter || req.status,
-          history: [newEntry, ...req.history],
-        };
-        if (firebaseAuthenticated) {
-          upsertRequestFirestore(updated).catch(console.error);
-        }
-        return updated;
-      })
+      prev.some((r) => r.id === updated.id)
+        ? prev.map((r) => (r.id === updated.id ? updated : r))
+        : [updated, ...prev]
     );
+    try {
+      const withFiles = await uploadRequestFiles(updated);
+      await upsertRequestFirestore(withFiles);
+    } catch (err) {
+      reportError('A alteração NÃO foi salva no Firebase', err);
+    }
+  };
+
+  /** Devolve a solicitação com uma nova entrada no histórico (e, opcionalmente, novo status). */
+  const withHistory = (
+    req: AdvanceRequest,
+    title: string,
+    opts: { comment?: string; statusAfter?: RequestStatus; patch?: Partial<AdvanceRequest> } = {}
+  ): AdvanceRequest => {
+    const entry: AuditLogEntry = {
+      id: 'h-' + Date.now() + Math.random().toString(36).slice(2, 6),
+      date: new Date().toISOString(),
+      authorId: currentUser?.id || 'sistema',
+      authorName: currentUser?.name || 'Sistema',
+      authorRole: currentUser?.role || 'admin',
+      title,
+      comment: opts.comment,
+      statusBefore: req.status,
+      statusAfter: opts.statusAfter,
+    };
+    return {
+      ...req,
+      ...opts.patch,
+      status: opts.statusAfter ?? req.status,
+      history: [entry, ...req.history],
+    };
+  };
+
+  const nextRequestCode = (): string => {
+    const prefix = `ADV-${new Date().getFullYear()}-`;
+    const max = requests.reduce((acc, r) => {
+      if (!r.code || !r.code.startsWith(prefix)) return acc;
+      const n = parseInt(r.code.slice(prefix.length), 10);
+      return Number.isNaN(n) ? acc : Math.max(acc, n);
+    }, 0);
+    return `${prefix}${String(max + 1).padStart(3, '0')}`;
   };
 
   const createRequest = (data: {
@@ -585,9 +496,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amountRequested?: number;
   }) => {
     if (!currentUser) return;
-    const newCode = `ADV-2026-${String(requests.length + 1).padStart(3, '0')}`;
+    const newCode = nextRequestCode();
+    const now = new Date().toISOString();
     const newReq: AdvanceRequest = {
-      id: 'req-' + Date.now(),
+      id: 'req-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       code: newCode,
       operatorId: currentUser.id,
       operatorName: currentUser.name,
@@ -600,11 +512,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       activities: data.activities,
       amountRequested: data.amountRequested ?? 0,
       status: 'Solicitação enviada',
-      createdAt: new Date().toISOString(),
+      createdAt: now,
       history: [
         {
           id: 'h-' + Date.now(),
-          date: new Date().toISOString(),
+          date: now,
           authorId: currentUser.id,
           authorName: currentUser.name,
           authorRole: currentUser.role,
@@ -614,14 +526,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
       ],
     };
-    setRequests((prev) => [newReq, ...prev]);
-    if (firebaseAuthenticated) {
-      upsertRequestFirestore(newReq).catch(console.error);
-    }
+    void persistRequest(newReq);
     addNotification('Nova Solicitação', `Solicitação ${newCode} enviada para análise.`);
   };
 
   const approveRequest = (id: string, comment?: string, approvedAmount?: number) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
     const isAmeta =
@@ -643,30 +553,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       : '';
     const fullComment = [amountNote, comment].filter(Boolean).join(' — ') || undefined;
 
-    setRequests((prev) =>
-      prev.map((r) => {
-        if (r.id !== id) return r;
-        const newEntry = {
-          id: 'h-' + Date.now() + Math.random().toString(36).substr(2, 4),
-          date: new Date().toISOString(),
-          authorId: currentUser?.id || 'admin',
-          authorName: currentUser?.name || 'Administrador',
-          authorRole: currentUser?.role || 'admin',
-          title: actionTitle,
-          comment: fullComment,
-          statusBefore: r.status,
-          statusAfter: nextStatus,
-        };
-        const updated: AdvanceRequest = {
-          ...r,
-          amountRequested: validAmount !== undefined ? validAmount : r.amountRequested,
-          status: nextStatus,
-          history: [newEntry, ...r.history],
-        };
-        if (firebaseAuthenticated) {
-          upsertRequestFirestore(updated).catch(console.error);
-        }
-        return updated;
+    void persistRequest(
+      withHistory(req, actionTitle, {
+        comment: fullComment,
+        statusAfter: nextStatus,
+        patch: { amountRequested: validAmount !== undefined ? validAmount : req.amountRequested },
       })
     );
 
@@ -681,48 +572,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectRequest = (id: string, reason: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
-    logAction(id, 'Solicitação Rejeitada', reason, req.status, 'Rejeitado');
+    void persistRequest(
+      withHistory(req, 'Solicitação Rejeitada', { comment: reason, statusAfter: 'Rejeitado' })
+    );
     addNotification('Solicitação Rejeitada', `A solicitação ${req.code} foi rejeitada.`);
   };
 
   const returnRequestForAdjustment = (id: string, reason: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
-    logAction(id, 'Solicitação Devolvida para Ajustes', reason, req.status, 'Aguardando ajustes');
+    void persistRequest(
+      withHistory(req, 'Solicitação Devolvida para Ajustes', {
+        comment: reason,
+        statusAfter: 'Aguardando ajustes',
+      })
+    );
     addNotification('Ajustes Solicitados', `A solicitação ${req.code} precisa de ajustes.`);
   };
 
   const authorizeInvoice = (id: string, observation: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
-    setRequests((prev) =>
-      prev.map((r) =>
-        r.id === id ? { ...r, invoiceAuthorized: true, invoiceObservation: observation } : r
-      )
-    );
-    logAction(
-      id,
-      'Emissão de Nota Fiscal Autorizada',
-      observation,
-      req.status,
-      'Autorizado emitir Nota Fiscal'
+    void persistRequest(
+      withHistory(req, 'Emissão de Nota Fiscal Autorizada', {
+        comment: observation,
+        statusAfter: 'Autorizado emitir Nota Fiscal',
+        patch: { invoiceAuthorized: true, invoiceObservation: observation },
+      })
     );
     addNotification('NF Autorizada', `Emissão de Nota Fiscal autorizada para ${req.code}.`);
   };
 
   const submitInvoice = (id: string, invoiceData: Omit<InvoiceData, 'status'>) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
     const fullInvoice: InvoiceData = { ...invoiceData, status: 'pendente' };
-    setRequests((prev) => prev.map((r) => (r.id === id ? { ...r, invoice: fullInvoice } : r)));
-    logAction(
-      id,
-      'Nota Fiscal Enviada para Conferência',
-      `NF nº ${invoiceData.number} enviada.`,
-      req.status,
-      'Nota Fiscal em conferência'
+    void persistRequest(
+      withHistory(req, 'Nota Fiscal Enviada para Conferência', {
+        comment: `NF nº ${invoiceData.number} enviada.`,
+        statusAfter: 'Nota Fiscal em conferência',
+        patch: { invoice: fullInvoice },
+      })
     );
     addNotification(
       'NF Enviada',
@@ -731,32 +627,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const reviewInvoice = (id: string, approved: boolean, comment?: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
     const newStatus: RequestStatus = approved
       ? 'Aguardando pagamento'
       : 'Nota Fiscal devolvida para correção';
-    setRequests((prev) =>
-      prev.map((r) => {
-        if (r.id !== id) return r;
-        return {
-          ...r,
-          invoice: r.invoice
-            ? {
-                ...r.invoice,
-                status: approved ? 'aprovado' : 'devolvido',
-                reviewComment: comment,
-              }
-            : undefined,
-        };
-      })
-    );
-    logAction(
-      id,
-      approved ? 'Nota Fiscal Aprovada' : 'Nota Fiscal Devolvida para Correção',
-      comment,
-      req.status,
-      newStatus
+    void persistRequest(
+      withHistory(
+        req,
+        approved ? 'Nota Fiscal Aprovada' : 'Nota Fiscal Devolvida para Correção',
+        {
+          comment,
+          statusAfter: newStatus,
+          patch: {
+            invoice: req.invoice
+              ? {
+                  ...req.invoice,
+                  status: approved ? 'aprovado' : 'devolvido',
+                  reviewComment: comment,
+                }
+              : undefined,
+          },
+        }
+      )
     );
     addNotification(
       approved ? 'NF Aprovada' : 'NF Devolvida',
@@ -765,25 +659,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const registerPayment = (id: string, paymentData: PaymentData) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
-    setRequests((prev) => prev.map((r) => (r.id === id ? { ...r, payment: paymentData } : r)));
-    logAction(
-      id,
-      'Pagamento Registrado',
-      `Valor de R$ ${paymentData.amountPaid.toFixed(2)} pago via ${paymentData.method}.`,
-      req.status,
-      'Pago'
+    void persistRequest(
+      withHistory(req, 'Pagamento Registrado', {
+        comment: `Valor de R$ ${paymentData.amountPaid.toFixed(2)} pago via ${paymentData.method}.`,
+        statusAfter: 'Pago',
+        patch: { payment: paymentData },
+      })
     );
     addNotification('Pagamento Efetuado', `Pagamento da solicitação ${req.code} registrado.`);
   };
 
   const submitAccountability = (id: string, expenses: ExpenseItem[]) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
     const totalExpenses = expenses.reduce((acc, item) => acc + item.amount, 0);
-    const advanceAmount = req.amountRequested;
-    const diff = advanceAmount - totalExpenses;
+    const diff = req.amountRequested - totalExpenses;
     let balanceType: 'saldo_a_devolver' | 'excedente' | 'zerado' = 'zerado';
     const balanceAmount = Math.abs(diff);
 
@@ -801,15 +695,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       reimbursementStatus: balanceType === 'excedente' ? ('pendente' as const) : undefined,
     };
 
-    setRequests((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, accountability: accountabilityData } : r))
-    );
-    logAction(
-      id,
-      'Prestação de Contas Enviada',
-      `Total de despesas: R$ ${totalExpenses.toFixed(2)}.`,
-      req.status,
-      'Prestação em análise'
+    void persistRequest(
+      withHistory(req, 'Prestação de Contas Enviada', {
+        comment: `Total de despesas: R$ ${totalExpenses.toFixed(2)}.`,
+        statusAfter: 'Prestação em análise',
+        patch: { accountability: accountabilityData },
+      })
     );
     addNotification(
       'Prestação Enviada',
@@ -823,52 +714,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     approved: boolean,
     reviewComment?: string
   ) => {
-    setRequests((prev) =>
-      prev.map((req) => {
-        if (req.id !== requestId || !req.accountability) return req;
-        const updatedExpenses = req.accountability.expenses.map((e) => {
-          if (e.id === expenseId) {
-            return { ...e, approved, reviewComment };
-          }
-          return e;
-        });
-        const totalExpenses = updatedExpenses
-          .filter((e) => e.approved !== false)
-          .reduce((acc, item) => acc + item.amount, 0);
-        const diff = req.amountRequested - totalExpenses;
-        let balanceType: 'saldo_a_devolver' | 'excedente' | 'zerado' = 'zerado';
-        const balanceAmount = Math.abs(diff);
-        if (diff > 0) balanceType = 'saldo_a_devolver';
-        else if (diff < 0) balanceType = 'excedente';
+    const req = requests.find((r) => r.id === requestId);
+    if (!req || !req.accountability) return;
 
-        return {
-          ...req,
-          accountability: {
-            ...req.accountability,
-            expenses: updatedExpenses,
-            totalExpenses,
-            balanceType,
-            balanceAmount,
-          },
-        };
-      })
+    const updatedExpenses = req.accountability.expenses.map((e) =>
+      e.id === expenseId ? { ...e, approved, reviewComment } : e
     );
+    const totalExpenses = updatedExpenses
+      .filter((e) => e.approved !== false)
+      .reduce((acc, item) => acc + item.amount, 0);
+    const diff = req.amountRequested - totalExpenses;
+    let balanceType: 'saldo_a_devolver' | 'excedente' | 'zerado' = 'zerado';
+    const balanceAmount = Math.abs(diff);
+    if (diff > 0) balanceType = 'saldo_a_devolver';
+    else if (diff < 0) balanceType = 'excedente';
+
+    void persistRequest({
+      ...req,
+      accountability: {
+        ...req.accountability,
+        expenses: updatedExpenses,
+        totalExpenses,
+        balanceType,
+        balanceAmount,
+      },
+    });
   };
 
   const finalizeActivity = (requestId: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === requestId);
     if (!req) return;
-    logAction(
-      requestId,
-      'Atividade Finalizada',
-      'Vistoriador AMETA finalizou a atividade com os comprovantes anexados.',
-      req.status,
-      'Finalizado'
+    void persistRequest(
+      withHistory(req, 'Atividade Finalizada', {
+        comment: 'Vistoriador AMETA finalizou a atividade com os comprovantes anexados.',
+        statusAfter: 'Finalizado',
+      })
     );
     addNotification('Atividade Finalizada', `A solicitação ${req.code} foi finalizada com sucesso.`);
   };
 
   const reviewAccountability = (id: string, approved: boolean, comment?: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req || !req.accountability) return;
 
@@ -881,12 +768,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       nextStatus = 'Aguardando aprovação de reembolso';
     }
 
-    logAction(
-      id,
-      approved ? 'Prestação de Contas Aprovada' : 'Prestação Devolvida para Ajustes',
-      comment,
-      req.status,
-      nextStatus
+    void persistRequest(
+      withHistory(
+        req,
+        approved ? 'Prestação de Contas Aprovada' : 'Prestação Devolvida para Ajustes',
+        { comment, statusAfter: nextStatus }
+      )
     );
     addNotification(
       'Prestação Analisada',
@@ -895,26 +782,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const registerRefund = (id: string, refundData: RefundData) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req || !req.accountability) return;
-    setRequests((prev) =>
-      prev.map((r) => {
-        if (r.id !== id || !r.accountability) return r;
-        return {
-          ...r,
-          accountability: {
-            ...r.accountability,
-            refundDetails: refundData,
-          },
-        };
+    void persistRequest(
+      withHistory(req, 'Devolução de Saldo Registrada', {
+        comment: `Valor devolvido: R$ ${refundData.amount.toFixed(2)} via ${refundData.method}.`,
+        statusAfter: 'Finalizado',
+        patch: { accountability: { ...req.accountability, refundDetails: refundData } },
       })
-    );
-    logAction(
-      id,
-      'Devolução de Saldo Registrada',
-      `Valor devolvido: R$ ${refundData.amount.toFixed(2)} via ${refundData.method}.`,
-      req.status,
-      'Finalizado'
     );
     addNotification(
       'Devolução Registrada',
@@ -923,159 +799,151 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveReimbursement = (id: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req || !req.accountability) return;
-    setRequests((prev) =>
-      prev.map((r) => {
-        if (r.id !== id || !r.accountability) return r;
-        return {
-          ...r,
-          accountability: {
-            ...r.accountability,
-            reimbursementStatus: 'aprovado',
-          },
-        };
+    void persistRequest(
+      withHistory(req, 'Reembolso de Excedente Aprovado e Finalizado', {
+        comment: 'Reembolso autorizado para pagamento.',
+        statusAfter: 'Finalizado',
+        patch: { accountability: { ...req.accountability, reimbursementStatus: 'aprovado' } },
       })
-    );
-    logAction(
-      id,
-      'Reembolso de Excedente Aprovado e Finalizado',
-      'Reembolso autorizado para pagamento.',
-      req.status,
-      'Finalizado'
     );
     addNotification('Reembolso Aprovado', `Reembolso excedente para ${req.code} aprovado.`);
   };
 
   const finalizeAccountability = (id: string) => {
+    if (!currentUser) return;
     const req = requests.find((r) => r.id === id);
     if (!req) return;
-    logAction(
-      id,
-      'Prestação Finalizada',
-      'Todas as pendências financeiras foram resolvidas.',
-      req.status,
-      'Finalizado'
+    void persistRequest(
+      withHistory(req, 'Prestação Finalizada', {
+        comment: 'Todas as pendências financeiras foram resolvidas.',
+        statusAfter: 'Finalizado',
+      })
     );
     addNotification('Processo Finalizado', `Solicitação ${req.code} totalmente finalizada.`);
   };
 
-  // ==================== USER MANAGEMENT ====================
-  const addUser = (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => {
+  // ==================== USUÁRIOS ====================
+  const addUser = async (userData: Omit<User, 'id' | 'createdAt' | 'active'>): Promise<void> => {
     const customPass = userData.password?.trim();
+    const password = customPass || DEFAULT_PASSWORD;
+    if (password.length < 6) throw new Error('A senha deve ter pelo menos 6 caracteres.');
+
+    // 1) cria a conta de login no Firebase Authentication (numa instância separada,
+    //    para o administrador não ser deslogado)
+    const provisioningAuth = getProvisioningAuth();
+    let uid: string;
+    try {
+      const cred = await createUserWithEmailAndPassword(
+        provisioningAuth,
+        userData.email.trim(),
+        password
+      );
+      uid = cred.user.uid;
+    } catch (err) {
+      throw new Error(friendlyAuthError(err));
+    } finally {
+      await signOut(provisioningAuth).catch(() => {});
+    }
+
+    // 2) grava o perfil/permissões no Firestore (a senha NUNCA é gravada)
     const newUser: User = {
-      ...userData,
-      id: 'user-' + Date.now(),
-      createdAt: new Date().toISOString().substring(0, 10),
+      id: uid,
+      name: userData.name,
+      email: userData.email.trim(),
+      cpfCnpj: userData.cpfCnpj || '',
+      phone: userData.phone || '',
+      role: userData.role,
       active: true,
       ativo: true,
-      password: customPass || 'ameta123',
+      createdAt: new Date().toISOString().substring(0, 10),
       isFirstLogin: !customPass,
     };
-    setUsers((prev) => [...prev, newUser]);
-    if (firebaseAuthenticated) {
-      upsertUserFirestore(newUser).catch(console.error);
+    try {
+      await upsertUserFirestore(newUser);
+    } catch (err) {
+      throw new Error(
+        `A conta de login foi criada, mas o perfil não foi salvo no Firestore: ${errorText(err)}`
+      );
     }
     addNotification(
       'Usuário Cadastrado',
       customPass
         ? `Novo usuário ${newUser.name} cadastrado com senha personalizada.`
-        : `Novo usuário ${newUser.name} cadastrado com senha padrão 'ameta123'.`
+        : `Novo usuário ${newUser.name} cadastrado com senha padrão '${DEFAULT_PASSWORD}'.`
     );
   };
 
-  const updateUser = (
+  const updateUser = async (
     userId: string,
     updates: Partial<
-      Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active' | 'password' | 'isFirstLogin'>
+      Pick<User, 'name' | 'email' | 'cpfCnpj' | 'phone' | 'role' | 'active' | 'isFirstLogin'>
     >
-  ) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id !== userId) return u;
-        const cleanUpdates = { ...updates };
-        if (cleanUpdates.password !== undefined && !cleanUpdates.password.trim()) {
-          delete cleanUpdates.password;
-        }
-        const updated: User = {
-          ...u,
-          ...cleanUpdates,
-          ativo: updates.active !== undefined ? updates.active : u.active,
-        };
-        if (firebaseAuthenticated) {
-          upsertUserFirestore(updated).catch(console.error);
-        }
-        return updated;
-      })
-    );
+  ): Promise<void> => {
+    const existing = users.find((u) => u.id === userId);
+    if (!existing) throw new Error('Usuário não encontrado.');
+    const active = updates.active !== undefined ? updates.active : existing.active;
+    const updated: User = { ...existing, ...updates, active, ativo: active };
+    try {
+      await upsertUserFirestore(updated);
+    } catch (err) {
+      throw new Error(errorText(err));
+    }
     addNotification('Usuário Atualizado', 'Dados e perfil de acesso atualizados com sucesso.');
   };
 
-  const toggleUserStatus = (userId: string) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id !== userId) return u;
-        const updated = { ...u, active: !u.active, ativo: !u.active };
-        if (firebaseAuthenticated) {
-          upsertUserFirestore(updated).catch(console.error);
-        }
-        return updated;
-      })
-    );
+  const toggleUserStatus = async (userId: string): Promise<void> => {
+    const existing = users.find((u) => u.id === userId);
+    if (!existing) return;
+    try {
+      await upsertUserFirestore({ ...existing, active: !existing.active, ativo: !existing.active });
+    } catch (err) {
+      reportError('Não foi possível alterar a situação do usuário', err);
+    }
   };
 
-  // ==================== PUBLIC CADASTRO & TEAMS WORKFLOW ====================
+  // ==================== CADASTRO PÚBLICO & FLUXO DAS EQUIPES ====================
   const createCadastro = async (
     campos16: Omit<
       CadastroPrestador,
       'id' | 'status' | 'criadoEm' | 'concluidoEm' | 'concluidoPorUid' | 'concluidoPorNome'
     >
   ): Promise<CadastroPrestador> => {
-    const id = 'cad-' + Date.now();
-    const novoCadastro: CadastroPrestador = {
+    const id = 'cad-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    try {
+      await criarCadastroPublicoFirestore(id, campos16);
+    } catch (err) {
+      console.error('Falha ao salvar o cadastro público no Firestore:', err);
+      throw new Error(
+        'Não foi possível enviar o cadastro agora. Confira os dados e tente novamente.'
+      );
+    }
+    addNotification(
+      'Novo Cadastro de Prestador',
+      `${campos16.nome} (${campos16.empresa}) enviou o formulário público.`
+    );
+    return {
       ...campos16,
       id,
       status: 'Pendente',
       criadoEm: new Date().toISOString(),
     };
-    setCadastros((prev) => [novoCadastro, ...prev]);
-
-    try {
-      await criarCadastroPublicoFirestore(id, campos16);
-    } catch (err) {
-      console.warn('Persistência local utilizada para cadastro público:', err);
-    }
-
-    addNotification(
-      'Novo Cadastro de Prestador',
-      `${campos16.nome} (${campos16.empresa}) enviou o formulário público.`
-    );
-    return novoCadastro;
   };
 
   const concluirCadastro = async (cadastroId: string) => {
     if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'financeiro')) return;
     const alvo = cadastros.find((c) => c.id === cadastroId);
-    const now = new Date().toISOString();
-    setCadastros((prev) =>
-      prev.map((c) =>
-        c.id === cadastroId
-          ? {
-              ...c,
-              status: 'Concluído',
-              concluidoEm: now,
-              concluidoPorUid: currentUser.id,
-              concluidoPorNome: currentUser.name,
-            }
-          : c
-      )
-    );
-    if (firebaseAuthenticated) {
+    try {
       await atualizarStatusCadastroFirestore(cadastroId, {
         status: 'Concluído',
         concluidoPorUid: currentUser.id,
         concluidoPorNome: currentUser.name,
       });
+    } catch (err) {
+      reportError('Não foi possível concluir o cadastro no Firebase', err);
+      return;
     }
     await appendAuditoria(
       'Cadastro concluído',
@@ -1105,19 +973,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const notaId = 'nf-eq-' + Date.now();
     let arquivoPath: string | undefined;
     let arquivoNome: string | undefined;
-    let arquivoData: string | undefined;
 
     if (file) {
-      if (firebaseAuthenticated) {
+      try {
         const up = await uploadAuthenticatedFile('notas', notaId, file, onProgress);
         arquivoPath = up.arquivoPath;
         arquivoNome = up.arquivoNome;
-      } else {
-        onProgress?.(45);
-        arquivoData = await readFileAsDataUrl(file);
-        arquivoNome = file.name;
-        arquivoPath = `notas/${notaId}/${file.name}`;
-        onProgress?.(100);
+      } catch (err) {
+        throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(err)}`);
       }
     }
 
@@ -1136,7 +999,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       observacoes: data.observacoes?.trim() || undefined,
       arquivoPath,
       arquivoNome,
-      arquivoData,
       status: 'Emitida',
       criadoPorUid: currentUser.id,
       criadoPorNome: currentUser.name,
@@ -1144,11 +1006,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       atualizadoEm: now,
     };
 
-    setNotasEquipe((prev) => [novaNota, ...prev]);
-
-    if (firebaseAuthenticated) {
-      const { arquivoData: _, ...firestorePayload } = novaNota;
-      await criarNotaFirestore(firestorePayload);
+    try {
+      await criarNotaFirestore(novaNota);
+    } catch (err) {
+      throw new Error(`Não foi possível salvar a nota no Firebase: ${errorText(err)}`);
     }
 
     await appendAuditoria(
@@ -1188,44 +1049,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let arquivoPath = existing.arquivoPath;
     let arquivoNome = existing.arquivoNome;
-    let arquivoData = existing.arquivoData;
 
     if (file) {
-      if (firebaseAuthenticated) {
+      try {
         const up = await uploadAuthenticatedFile('notas', notaId, file, onProgress);
         arquivoPath = up.arquivoPath;
         arquivoNome = up.arquivoNome;
-      } else {
-        onProgress?.(50);
-        arquivoData = await readFileAsDataUrl(file);
-        arquivoNome = file.name;
-        arquivoPath = `notas/${notaId}/${file.name}`;
-        onProgress?.(100);
+      } catch (err) {
+        throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(err)}`);
       }
     }
 
-    const now = new Date().toISOString();
-    setNotasEquipe((prev) =>
-      prev.map((n) =>
-        n.id === notaId
-          ? {
-              ...n,
-              ...updates,
-              arquivoPath,
-              arquivoNome,
-              arquivoData,
-              atualizadoEm: now,
-            }
-          : n
-      )
-    );
-
-    if (firebaseAuthenticated) {
-      await atualizarNotaFirestore(notaId, {
-        ...updates,
-        arquivoPath,
-        arquivoNome,
-      });
+    try {
+      await atualizarNotaFirestore(notaId, { ...updates, arquivoPath, arquivoNome });
+    } catch (err) {
+      throw new Error(`Não foi possível atualizar a nota no Firebase: ${errorText(err)}`);
     }
 
     await appendAuditoria(
@@ -1241,24 +1079,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser) return;
     const existing = notasEquipe.find((n) => n.id === notaId);
     if (!existing) return;
-    const now = new Date().toISOString();
 
-    setNotasEquipe((prev) =>
-      prev.map((n) =>
-        n.id === notaId ? { ...n, status: 'Aguardando comprovante', atualizadoEm: now } : n
-      )
-    );
-
-    setCadastros((prev) =>
-      prev.map((c) =>
-        c.id === existing.prestadorId && c.status === 'Pendente'
-          ? { ...c, status: 'Em andamento' }
-          : c
-      )
-    );
-
-    if (firebaseAuthenticated) {
+    try {
       await atualizarNotaFirestore(notaId, { status: 'Aguardando comprovante' });
+    } catch (err) {
+      reportError('Não foi possível liberar a nota para comprovante', err);
+      return;
+    }
+
+    // Só Financeiro/Coordenação podem alterar o status do cadastro (regras do Firestore).
+    const prestador = cadastros.find((c) => c.id === existing.prestadorId);
+    if (
+      prestador &&
+      prestador.status === 'Pendente' &&
+      (currentUser.role === 'admin' || currentUser.role === 'financeiro')
+    ) {
+      try {
+        await atualizarStatusCadastroFirestore(prestador.id, { status: 'Em andamento' });
+      } catch (err) {
+        reportError('Não foi possível atualizar o status do cadastro', err);
+      }
     }
 
     await appendAuditoria(
@@ -1276,9 +1116,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deleteNotaEquipe = async (notaId: string) => {
     if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'financeiro')) return;
     const target = notasEquipe.find((n) => n.id === notaId);
-    setNotasEquipe((prev) => prev.filter((n) => n.id !== notaId));
-    if (firebaseAuthenticated) {
+    try {
       await excluirNotaFirestore(notaId, target?.arquivoPath);
+    } catch (err) {
+      reportError('Não foi possível excluir a nota no Firebase', err);
+      return;
     }
     await appendAuditoria(
       'Nota fiscal excluída',
@@ -1307,20 +1149,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!nota && !req) throw new Error('É obrigatório existir uma nota fiscal ou solicitação vinculada.');
 
     const compId = 'comp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
+    const folderId = nota ? nota.id : req?.id || 'geral';
+
     let arquivoPath = '';
     let arquivoNome = file.name;
-    let arquivoData: string | undefined;
-
-    const folderId = nota ? nota.id : req?.id || 'geral';
-    if (firebaseAuthenticated) {
+    try {
       const up = await uploadAuthenticatedFile('comprovantes', folderId, file, onProgress);
       arquivoPath = up.arquivoPath;
       arquivoNome = up.arquivoNome;
-    } else {
-      onProgress?.(40);
-      arquivoData = await readFileAsDataUrl(file);
-      onProgress?.(100);
-      arquivoPath = `comprovantes/${folderId}/${file.name}`;
+    } catch (err) {
+      throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(err)}`);
     }
 
     const validMime: ComprovanteServico['tipo'] =
@@ -1338,7 +1176,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       data: data.data,
       arquivoPath,
       arquivoNome,
-      arquivoData,
       tipo: validMime,
       tamanho: file.size,
       criadoPorUid: currentUser.id,
@@ -1346,27 +1183,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       criadoEm: new Date().toISOString(),
     };
 
-    setComprovantes((prev) => [novoComp, ...prev]);
-
-    if (nota) {
-      const wasNotComprovada = nota.status !== 'Comprovada';
-      if (wasNotComprovada) {
-        setNotasEquipe((prev) =>
-          prev.map((n) =>
-            n.id === nota.id
-              ? { ...n, status: 'Comprovada', atualizadoEm: new Date().toISOString() }
-              : n
-          )
-        );
-      }
-      if (firebaseAuthenticated && wasNotComprovada) {
-        await atualizarNotaFirestore(nota.id, { status: 'Comprovada' });
-      }
+    try {
+      await criarComprovanteFirestore(novoComp);
+    } catch (err) {
+      throw new Error(`Não foi possível salvar o comprovante no Firebase: ${errorText(err)}`);
     }
 
-    if (firebaseAuthenticated) {
-      const { arquivoData: _, ...firestorePayload } = novoComp;
-      await criarComprovanteFirestore(firestorePayload);
+    if (nota && nota.status !== 'Comprovada') {
+      try {
+        await atualizarNotaFirestore(nota.id, { status: 'Comprovada' });
+      } catch (err) {
+        reportError('O comprovante foi salvo, mas não foi possível marcar a nota como Comprovada', err);
+      }
     }
 
     await appendAuditoria(
@@ -1376,19 +1204,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `Comprovante ${arquivoNome} anexado a ${nota ? `nota ${nota.numero}` : `solicitação ${req?.code}`}`
     );
 
-    addNotification(
-      'Comprovante Enviado',
-      `Comprovante ${arquivoNome} anexado com sucesso.`
-    );
+    addNotification('Comprovante Enviado', `Comprovante ${arquivoNome} anexado com sucesso.`);
     return novoComp;
   };
 
   const deleteComprovante = async (comprovanteId: string) => {
     if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'financeiro')) return;
     const target = comprovantes.find((c) => c.id === comprovanteId);
-    setComprovantes((prev) => prev.filter((c) => c.id !== comprovanteId));
-    if (firebaseAuthenticated) {
+    try {
       await excluirComprovanteFirestore(comprovanteId, target?.arquivoPath);
+    } catch (err) {
+      reportError('Não foi possível excluir o comprovante no Firebase', err);
+      return;
     }
     await appendAuditoria(
       'Comprovante excluído',
@@ -1407,10 +1234,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resolveAuthenticatedStorageUrl = async (arquivoPath?: string): Promise<string | null> => {
-    if (!arquivoPath || !firebaseAuthenticated) return null;
+    if (!arquivoPath || !auth.currentUser) return null;
     try {
       return await getAuthenticatedDownloadUrl(arquivoPath);
-    } catch {
+    } catch (err) {
+      console.error('Não foi possível obter o link do arquivo no Storage:', err);
       return null;
     }
   };
@@ -1425,11 +1253,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         comprovantes,
         auditoria,
         currentUser,
-        firebaseAuthenticated,
+        authReady,
+        syncError,
+        dismissSyncError,
         login,
         loginWithGoogle,
         logout,
         changePassword,
+        sendPasswordReset,
         activeRole,
         createRequest,
         approveRequest,
