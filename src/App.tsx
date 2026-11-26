@@ -44,7 +44,7 @@ function isPublicCadastroUrl(): boolean {
 }
 
 function MainContent() {
-  const { currentUser, activeRole } = useApp();
+  const { currentUser, activeRole, authReady, syncError, dismissSyncError } = useApp();
   const [currentTab, setCurrentTab] = useState('op-dashboard');
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -65,6 +65,14 @@ function MainContent() {
 
   if (showPublicForm) {
     return <PublicRegistrationForm onBackToLogin={() => setShowPublicForm(false)} />;
+  }
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400 text-sm font-sans">
+        Carregando...
+      </div>
+    );
   }
 
   if (!currentUser) {
@@ -166,6 +174,22 @@ function MainContent() {
   return (
     <div className="flex h-[100dvh] bg-slate-100 overflow-hidden font-sans relative">
       {currentUser.isFirstLogin && <ChangePasswordModal />}
+
+      {syncError && (
+        <div
+          role="alert"
+          className="fixed top-3 left-1/2 -translate-x-1/2 z-[60] w-[92%] max-w-xl bg-red-600 text-white rounded-2xl shadow-2xl px-4 py-3 text-xs font-semibold flex items-start gap-3"
+        >
+          <span className="flex-1">{syncError}</span>
+          <button
+            type="button"
+            onClick={dismissSyncError}
+            className="shrink-0 underline font-bold"
+          >
+            Fechar
+          </button>
+        </div>
+      )}
 
       <Sidebar
         currentTab={currentTab}
