@@ -73,6 +73,7 @@
         "observacoes": { "type": "string", "maxLength": 1000 },
         "arquivoPath": { "type": "string", "maxLength": 500 },
         "arquivoNome": { "type": "string", "maxLength": 250 },
+        "arquivoData": { "type": "string", "maxLength": 900000 },
         "status": {
           "type": "string",
           "enum": ["Emitida", "Aguardando comprovante", "Comprovada"]
@@ -103,6 +104,7 @@
         "data": { "type": "string", "minLength": 8, "maxLength": 20 },
         "arquivoPath": { "type": "string", "minLength": 1, "maxLength": 500 },
         "arquivoNome": { "type": "string", "maxLength": 250 },
+        "arquivoData": { "type": "string", "maxLength": 900000 },
         "tipo": { "type": "string", "enum": ["application/pdf", "image/jpeg", "image/png"] },
         "tamanho": { "type": "number" },
         "criadoPorUid": { "type": "string", "minLength": 1, "maxLength": 128 },

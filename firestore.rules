@@ -126,7 +126,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'prestadorId', 'prestadorNome', 'prestadorCnpj', 'prestadorEmpresa', 'prestadorFuncao',
           'numero', 'dataEmissao', 'valor', 'descricao', 'observacoes',
-          'arquivoPath', 'arquivoNome', 'status', 'criadoPorUid', 'criadoPorNome', 'criadoEm', 'atualizadoEm'
+          'arquivoPath', 'arquivoNome', 'arquivoData', 'status', 'criadoPorUid', 'criadoPorNome', 'criadoEm', 'atualizadoEm'
         ]) &&
         isValidId(data.prestadorId) &&
         data.prestadorNome is string && data.prestadorNome.size() >= 2 && data.prestadorNome.size() <= 150 &&
@@ -140,6 +140,7 @@ service cloud.firestore {
         (!('prestadorFuncao' in data) || (data.prestadorFuncao is string && data.prestadorFuncao.size() <= 120)) &&
         (!('arquivoPath' in data) || (data.arquivoPath is string && data.arquivoPath.size() <= 500)) &&
         (!('arquivoNome' in data) || (data.arquivoNome is string && data.arquivoNome.size() <= 250)) &&
+        (!('arquivoData' in data) || (data.arquivoData is string && data.arquivoData.size() <= 900000)) &&
         data.status in ['Emitida', 'Aguardando comprovante', 'Comprovada'] &&
         data.criadoPorUid is string && data.criadoPorUid.size() <= 128 &&
         data.criadoPorNome is string && data.criadoPorNome.size() >= 2 && data.criadoPorNome.size() <= 150;
@@ -158,6 +159,7 @@ service cloud.firestore {
         data.data is string && data.data.size() >= 8 && data.data.size() <= 20 &&
         data.arquivoPath is string && data.arquivoPath.size() >= 1 && data.arquivoPath.size() <= 500 &&
         (!('arquivoNome' in data) || (data.arquivoNome is string && data.arquivoNome.size() <= 250)) &&
+        (!('arquivoData' in data) || (data.arquivoData is string && data.arquivoData.size() <= 900000)) &&
         data.tipo in ['application/pdf', 'image/jpeg', 'image/png'] &&
         data.tamanho is number && data.tamanho > 0 && data.tamanho <= 10485760 &&
         data.criadoPorUid is string && data.criadoPorUid.size() <= 128 &&

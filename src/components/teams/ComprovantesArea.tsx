@@ -152,8 +152,8 @@ export const ComprovantesArea: React.FC = () => {
         setErrorMsg(`Arquivo "${rawFile.name}" rejeitado. Envie foto (JPG, PNG, WEBP) ou PDF.`);
         return;
       }
-      if (!isImg && rawFile.size > 10 * 1024 * 1024) {
-        setErrorMsg(`PDF "${rawFile.name}" ultrapassa o limite de 10 MB.`);
+      if (!isImg && rawFile.size > 600 * 1024) {
+        setErrorMsg(`PDF "${rawFile.name}" ultrapassa 600 KB. Envie uma foto (JPG/PNG) que será comprimida automaticamente.`);
         return;
       }
       if (isImg && rawFile.size > 25 * 1024 * 1024) {

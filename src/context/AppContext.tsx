@@ -41,7 +41,6 @@ import {
   markFirstLoginDoneFirestore,
   registrarAuditoriaFirestore,
   subscribeTeamCollections,
-  uploadAuthenticatedFile,
   uploadRequestFiles,
   upsertRequestFirestore,
   upsertUserFirestore,
@@ -1106,16 +1105,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const notaId = 'nf-eq-' + Date.now();
     let arquivoPath: string | undefined;
     let arquivoNome: string | undefined;
+    let arquivoData: string | undefined;
 
     if (file) {
-      try {
-        const prepared = await prepareUploadFile(file, 1400, 0.78);
-        const up = await uploadAuthenticatedFile('notas', notaId, prepared.file, onProgress);
-        arquivoPath = up.arquivoPath;
-        arquivoNome = up.arquivoNome;
-      } catch (err) {
-        throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(err)}`);
+      const prepared = await prepareUploadFile(file, 1280, 0.72);
+      if (prepared.dataUrl.length > 880_000) {
+        throw new Error(
+          'O arquivo selecionado é muito grande (máx. ~600 KB para PDF/XML). Envie uma foto ou um arquivo menor.'
+        );
       }
+      arquivoPath = `inline/${notaId}`;
+      arquivoNome = prepared.file.name || file.name;
+      arquivoData = prepared.dataUrl;
+      onProgress?.(100);
     }
 
     const now = new Date().toISOString();
@@ -1133,6 +1135,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       observacoes: data.observacoes?.trim() || undefined,
       arquivoPath,
       arquivoNome,
+      arquivoData,
       status: 'Emitida',
       criadoPorUid: currentUser.id,
       criadoPorNome: currentUser.name,
@@ -1184,20 +1187,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let arquivoPath = existing.arquivoPath;
     let arquivoNome = existing.arquivoNome;
+    let arquivoData = existing.arquivoData;
 
     if (file) {
-      try {
-        const prepared = await prepareUploadFile(file, 1400, 0.78);
-        const up = await uploadAuthenticatedFile('notas', notaId, prepared.file, onProgress);
-        arquivoPath = up.arquivoPath;
-        arquivoNome = up.arquivoNome;
-      } catch (err) {
-        throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(err)}`);
+      const prepared = await prepareUploadFile(file, 1280, 0.72);
+      if (prepared.dataUrl.length > 880_000) {
+        throw new Error(
+          'O arquivo selecionado é muito grande (máx. ~600 KB para PDF/XML). Envie uma foto ou um arquivo menor.'
+        );
       }
+      arquivoPath = `inline/${notaId}`;
+      arquivoNome = prepared.file.name || file.name;
+      arquivoData = prepared.dataUrl;
+      onProgress?.(100);
     }
 
     try {
-      await atualizarNotaFirestore(notaId, { ...updates, arquivoPath, arquivoNome });
+      await atualizarNotaFirestore(notaId, { ...updates, arquivoPath, arquivoNome, arquivoData });
     } catch (err) {
       throw new Error(`Não foi possível atualizar a nota no Firebase: ${errorText(err)}`);
     }
@@ -1290,33 +1296,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!nota && !req) throw new Error('É obrigatório existir uma nota fiscal ou solicitação vinculada.');
 
     const compId = 'comp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
-    const folderId = nota ? nota.id : req?.id || 'geral';
 
-    const prepared = await prepareUploadFile(file, 1280, 0.74);
+    const prepared = await prepareUploadFile(file, 1200, 0.72);
     const uploadTargetFile = prepared.file;
     const validMime: ComprovanteServico['tipo'] =
       uploadTargetFile.type === 'image/jpeg' || uploadTargetFile.type === 'image/png'
         ? uploadTargetFile.type
         : 'application/pdf';
 
-    let arquivoPath = '';
-    let arquivoNome = file.name;
-    let arquivoData: string | undefined;
-
-    try {
-      const up = await uploadAuthenticatedFile('comprovantes', folderId, uploadTargetFile, onProgress);
-      arquivoPath = up.arquivoPath;
-      arquivoNome = up.arquivoNome;
-    } catch (storageErr) {
-      if (prepared.dataUrl && prepared.dataUrl.length <= 780_000) {
-        console.warn('Storage indisponível; salvando comprovante comprimido no Firestore:', storageErr);
-        arquivoPath = `inline/${compId}`;
-        arquivoData = prepared.dataUrl;
-        onProgress?.(100);
-      } else {
-        throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(storageErr)}`);
-      }
+    if (!prepared.dataUrl || prepared.dataUrl.length > 880_000) {
+      throw new Error(
+        'O arquivo é muito grande para envio direto (máx. ~600 KB para PDF). Para comprovantes em foto, envie como imagem (JPG/PNG).'
+      );
     }
+
+    const arquivoPath = `inline/${compId}`;
+    const arquivoNome = prepared.file.name || file.name;
+    const arquivoData = prepared.dataUrl;
+    onProgress?.(100);
 
     const novoComp: ComprovanteServico = {
       id: compId,

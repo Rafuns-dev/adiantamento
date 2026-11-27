@@ -21,6 +21,7 @@ export const InvoiceReview: React.FC = () => {
 
   const [nameFilter, setNameFilter] = useState('');
   const [selectedName, setSelectedName] = useState('todos');
+  const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'warning'; text: string } | null>(null);
 
   const allInvoices = requests.filter(
     r => r.status === 'Nota Fiscal enviada' || r.status === 'Nota Fiscal em conferência' || r.invoice
@@ -40,9 +41,16 @@ export const InvoiceReview: React.FC = () => {
   const handleReviewSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeReq) return;
-    reviewInvoice(activeReq.id, isApproving, reviewComment);
+    const code = activeReq.code;
+    const approved = isApproving;
+    reviewInvoice(activeReq.id, approved, reviewComment);
     setActiveReq(null);
     setReviewComment('');
+    setFeedbackMsg(
+      approved
+        ? { type: 'success', text: `Nota Fiscal (${code}) aprovada e enviada para pagamento.` }
+        : { type: 'warning', text: `Nota Fiscal (${code}) recusada e devolvida para correção.` }
+    );
   };
 
   return (
@@ -97,6 +105,33 @@ export const InvoiceReview: React.FC = () => {
         </div>
       </div>
 
+      {feedbackMsg && (
+        <div
+          className={`rounded-2xl border px-4 py-3 text-xs font-semibold flex items-center justify-between gap-3 ${
+            feedbackMsg.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {feedbackMsg.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <XCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            )}
+            <span>{feedbackMsg.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedbackMsg(null)}
+            className="text-slate-400 hover:text-slate-600 shrink-0"
+            aria-label="Fechar aviso"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {pendingInvoices.length === 0 ? (
           <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-500 text-xs">
@@ -108,6 +143,26 @@ export const InvoiceReview: React.FC = () => {
           pendingInvoices.map(req => {
             const inv = req.invoice;
             if (!inv) return null;
+
+            const isApproved =
+              inv.status === 'aprovado' ||
+              [
+                'Aguardando pagamento',
+                'Pago',
+                'Aguardando comprovante',
+                'Aguardando prestação de contas',
+                'Prestação em análise',
+                'Prestação devolvida para ajustes',
+                'Aguardando devolução de saldo',
+                'Aguardando aprovação de reembolso',
+                'Finalizado'
+              ].includes(req.status);
+
+            const isReturned =
+              !isApproved &&
+              (inv.status === 'devolvido' || req.status === 'Nota Fiscal devolvida para correção');
+
+            const canReview = !isApproved && !isReturned;
 
             return (
               <div key={req.id} className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 flex flex-col justify-between space-y-4">
@@ -166,6 +221,31 @@ export const InvoiceReview: React.FC = () => {
                 </div>
 
                 <div className="space-y-2 pt-2">
+                  {isApproved && (
+                    <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs text-emerald-800 flex items-center gap-2 font-semibold">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>
+                        {req.status === 'Aguardando pagamento'
+                          ? 'NF aprovada — esta solicitação foi enviada para pagamento.'
+                          : `NF aprovada — enviada para pagamento (${req.status}).`}
+                      </span>
+                    </div>
+                  )}
+
+                  {isReturned && (
+                    <div className="rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs text-red-800 flex items-start gap-2">
+                      <XCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-semibold">
+                          NF recusada e devolvida para correção — aguardando reenvio pelo operador.
+                        </p>
+                        {inv.reviewComment && (
+                          <p className="text-[11px] text-red-700 mt-0.5">Motivo: {inv.reviewComment}</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <button
                     onClick={() =>
                       setViewingDoc({
@@ -195,14 +275,34 @@ export const InvoiceReview: React.FC = () => {
                   </button>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => { setActiveReq(req); setIsApproving(true); }}
-                      className="flex-1 py-2.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition-colors"
+                      type="button"
+                      disabled={!canReview}
+                      onClick={() => {
+                        if (!canReview) return;
+                        setActiveReq(req);
+                        setIsApproving(true);
+                      }}
+                      className={`flex-1 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors ${
+                        canReview
+                          ? 'bg-teal-600 hover:bg-teal-500 text-white shadow-sm'
+                          : 'bg-slate-200 text-slate-400 opacity-60 cursor-not-allowed'
+                      }`}
                     >
                       <CheckCircle2 className="w-4 h-4" /> Aprovar NF
                     </button>
                     <button
-                      onClick={() => { setActiveReq(req); setIsApproving(false); }}
-                      className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition-colors"
+                      type="button"
+                      disabled={!canReview}
+                      onClick={() => {
+                        if (!canReview) return;
+                        setActiveReq(req);
+                        setIsApproving(false);
+                      }}
+                      className={`flex-1 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors ${
+                        canReview
+                          ? 'bg-red-600 hover:bg-red-500 text-white shadow-sm'
+                          : 'bg-slate-200 text-slate-400 opacity-60 cursor-not-allowed'
+                      }`}
                     >
                       <XCircle className="w-4 h-4" /> Devolver / Corrigir
                     </button>

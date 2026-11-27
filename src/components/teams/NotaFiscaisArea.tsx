@@ -159,8 +159,12 @@ export const NotaFiscaisArea: React.FC = () => {
       setFormError('Envie foto (JPG, PNG, WEBP), PDF ou XML da Nota Fiscal.');
       return;
     }
-    if (file.size > 15 * 1024 * 1024) {
-      setFormError('O arquivo excede o limite máximo de 15 MB.');
+    if (!isImageFile(file) && file.size > 600 * 1024) {
+      setFormError('Para PDF ou XML o limite sem Storage é de 600 KB. Você pode enviar uma foto (JPG/PNG) que será comprimida automaticamente.');
+      return;
+    }
+    if (isImageFile(file) && file.size > 25 * 1024 * 1024) {
+      setFormError('A imagem ultrapassa o limite de 25 MB.');
       return;
     }
     setSelectedFile(file);

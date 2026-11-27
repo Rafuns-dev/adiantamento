@@ -128,86 +128,21 @@ const MIME_EXTENSIONS: Record<string, string> = {
   'image/gif': '.gif',
 };
 
-/**
- * Envia o arquivo (data URL) para o Firebase Storage e devolve `storage:<caminho>`.
- * Se o Storage recusar (ex.: CORS ou regras pendentes no console) e o arquivo já estiver
- * comprimido em tamanho seguro para o Firestore (<= 650 KB), mantém o data URL embutido
- * para garantir que fotos de comprovantes e notas fiscais não sejam perdidas.
- */
-async function externalizeDataUrl(
-  requestId: string,
-  value: string | undefined
-): Promise<string | undefined> {
-  if (!value || !value.startsWith('data:')) return value;
-  const mime = value.match(/^data:([^;,]+)/)?.[1] ?? 'application/octet-stream';
-  const ext = MIME_EXTENSIONS[mime] ?? '';
-  const uuid =
-    typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2) + Date.now().toString(36);
-  const path = `solicitacoes/${requestId}/${uuid}${ext}`;
-
-  try {
-    await Promise.race([
-      uploadString(ref(storage, path), value, 'data_url'),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Timeout no upload para Storage')), 10000)
-      ),
-    ]);
-    return `${STORAGE_REF_PREFIX}${path}`;
-  } catch (err) {
-    if (value.length <= 650_000) {
-      console.warn('Upload no Storage falhou; salvando anexo comprimido no Firestore:', err);
-      return value;
-    }
-    throw err;
-  }
-}
-
-/** Envia ao Storage todos os anexos (NF, XML, comprovantes) ainda em base64 de uma solicitação. */
+/** Sem Firebase Storage ativo: mantém os anexos comprimidos diretamente no documento do Firestore. */
 export async function uploadRequestFiles(req: AdvanceRequest): Promise<AdvanceRequest> {
-  const invoice = req.invoice
-    ? {
-        ...req.invoice,
-        pdfData: await externalizeDataUrl(req.id, req.invoice.pdfData),
-        xmlData: await externalizeDataUrl(req.id, req.invoice.xmlData),
-      }
-    : undefined;
-
-  const payment = req.payment
-    ? { ...req.payment, receiptData: await externalizeDataUrl(req.id, req.payment.receiptData) }
-    : undefined;
-
-  const accountability = req.accountability
-    ? {
-        ...req.accountability,
-        expenses: await Promise.all(
-          req.accountability.expenses.map(async (e) => ({
-            ...e,
-            receiptData: await externalizeDataUrl(req.id, e.receiptData),
-          }))
-        ),
-        refundDetails: req.accountability.refundDetails
-          ? {
-              ...req.accountability.refundDetails,
-              receiptData: await externalizeDataUrl(
-                req.id,
-                req.accountability.refundDetails.receiptData
-              ),
-            }
-          : undefined,
-      }
-    : undefined;
-
-  return { ...req, invoice, payment, accountability };
+  return req;
 }
 
 export async function getAuthenticatedDownloadUrl(arquivoPath: string): Promise<string> {
-  if (arquivoPath.startsWith('inline/')) {
+  if (!arquivoPath || arquivoPath.startsWith('inline/')) {
     return '';
   }
-  const storageRef = ref(storage, arquivoPath);
-  return getDownloadURL(storageRef);
+  try {
+    const storageRef = ref(storage, arquivoPath);
+    return await getDownloadURL(storageRef);
+  } catch {
+    return '';
+  }
 }
 
 export async function deleteStorageFile(arquivoPath?: string): Promise<void> {
@@ -267,7 +202,7 @@ export async function atualizarStatusCadastroFirestore(
 }
 
 export async function criarNotaFirestore(
-  nota: Omit<NotaFiscalEquipe, 'criadoEm' | 'atualizadoEm' | 'arquivoData'>
+  nota: Omit<NotaFiscalEquipe, 'criadoEm' | 'atualizadoEm'>
 ): Promise<void> {
   const path = `notas/${nota.id}`;
   try {
@@ -290,6 +225,7 @@ export async function criarNotaFirestore(
     if (nota.observacoes) payload.observacoes = nota.observacoes.slice(0, 1000);
     if (nota.arquivoPath) payload.arquivoPath = nota.arquivoPath.slice(0, 500);
     if (nota.arquivoNome) payload.arquivoNome = nota.arquivoNome.slice(0, 250);
+    if (nota.arquivoData) payload.arquivoData = nota.arquivoData;
 
     await setDoc(doc(db, 'notas', nota.id), payload);
   } catch (err) {
@@ -299,7 +235,7 @@ export async function criarNotaFirestore(
 
 export async function atualizarNotaFirestore(
   id: string,
-  updates: Partial<Omit<NotaFiscalEquipe, 'id' | 'criadoEm' | 'criadoPorUid' | 'arquivoData'>>
+  updates: Partial<Omit<NotaFiscalEquipe, 'id' | 'criadoEm' | 'criadoPorUid'>>
 ): Promise<void> {
   const path = `notas/${id}`;
   try {
@@ -447,7 +383,7 @@ export async function upsertRequestFirestore(req: AdvanceRequest): Promise<void>
     const serializedBytes = new Blob([JSON.stringify(payload)]).size;
     if (serializedBytes > 980_000) {
       throw new Error(
-        'Os anexos ultrapassam o limite do banco e o Storage recusou o envio. Reduza a quantidade de arquivos ou publique as regras do Storage no Firebase Console.'
+        'Os anexos ultrapassam o limite de 1 MB por documento no Firestore. Reduza a quantidade de fotos ou envie arquivos menores.'
       );
     }
     await setDoc(doc(db, 'solicitacoes', req.id), payload);
