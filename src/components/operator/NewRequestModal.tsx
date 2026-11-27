@@ -12,9 +12,11 @@ export const NewRequestModal: React.FC<NewRequestProps> = ({ setCurrentTab }) =>
   const [destination, setDestination] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [project, setProject] = useState<'Ericsson' | 'Nokia' | ''>('');
   const [purpose, setPurpose] = useState('');
   const [activities, setActivities] = useState('');
   const [description, setDescription] = useState('');
+  const [formError, setFormError] = useState('');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [successMessage, setSuccessMessage] = useState(false);
 
@@ -24,12 +26,17 @@ export const NewRequestModal: React.FC<NewRequestProps> = ({ setCurrentTab }) =>
 
   const handleSubmitClick = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!destination || !startDate || !endDate || !purpose.trim()) {
-      alert('Por favor, preencha todos os campos obrigatórios.');
+    setFormError('');
+    if (!destination.trim() || !startDate || !endDate || !purpose.trim()) {
+      setFormError('Por favor, preencha todos os campos obrigatórios.');
+      return;
+    }
+    if (!isVistoriadorAmeta && !project) {
+      setFormError('Por favor, selecione o Projeto (Ericsson ou Nokia).');
       return;
     }
     if (isVistoriadorAmeta && !activities.trim()) {
-      alert('Informe as atividades que justificam o adiantamento.');
+      setFormError('Informe as atividades que justificam o adiantamento.');
       return;
     }
     setShowConfirmModal(true);
@@ -37,6 +44,7 @@ export const NewRequestModal: React.FC<NewRequestProps> = ({ setCurrentTab }) =>
 
   const confirmAndSend = () => {
     createRequest({
+      project: !isVistoriadorAmeta && project ? project : undefined,
       destination,
       startDate,
       endDate,
@@ -144,15 +152,43 @@ export const NewRequestModal: React.FC<NewRequestProps> = ({ setCurrentTab }) =>
             </div>
           </div>
 
+          {/* Projeto (Vistoriador Externo) */}
+          {!isVistoriadorAmeta && (
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-2">
+                Projeto <span className="text-red-500">*</span>
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                {(['Ericsson', 'Nokia'] as const).map(opt => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => {
+                      setProject(opt);
+                      if (formError) setFormError('');
+                    }}
+                    className={`py-3 px-4 rounded-xl border text-sm font-bold flex items-center justify-center gap-2 transition-all ${
+                      project === opt
+                        ? 'bg-teal-600 border-teal-600 text-white shadow-sm'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Acionamentos / Finalidade */}
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-2">
-              Coloque seus acionamentos <span className="text-red-500">*</span>
+              Coloque seus site IDs <span className="text-red-500">*</span>
             </label>
             <input
               type="text"
               required
-              placeholder="Ex: Acionamento #104 - Vistoria Estrutural Completa e Medição de Verticalidade"
+              placeholder="Ex: Site IDs / Acionamento #104"
               value={purpose}
               onChange={e => setPurpose(e.target.value)}
               className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:bg-white"
@@ -193,6 +229,13 @@ export const NewRequestModal: React.FC<NewRequestProps> = ({ setCurrentTab }) =>
             />
           </div>
         </div>
+
+        {formError && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-xs font-semibold flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{formError}</span>
+          </div>
+        )}
 
         <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
           <button
@@ -240,6 +283,12 @@ export const NewRequestModal: React.FC<NewRequestProps> = ({ setCurrentTab }) =>
                   <p className="font-bold text-slate-900">{new Date(endDate).toLocaleDateString('pt-BR')}</p>
                 </div>
               </div>
+              {project && (
+                <div>
+                  <span className="text-slate-500 text-xs">Projeto:</span>
+                  <p className="font-bold text-teal-700">{project}</p>
+                </div>
+              )}
               <div>
                 <span className="text-slate-500 text-xs">Acionamentos:</span>
                 <p className="font-bold text-slate-900">{purpose}</p>

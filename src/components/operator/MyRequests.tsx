@@ -102,8 +102,15 @@ export const MyRequests: React.FC = () => {
                 filteredRequests.map(req => (
                   <tr key={req.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-4 px-6">
-                      <span className="font-bold text-slate-900 block">{req.code}</span>
-                      <span className="text-xs text-slate-500 truncate max-w-xs block">{req.purpose}</span>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-900">{req.code}</span>
+                        {req.project && (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            {req.project}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-500 truncate max-w-xs block mt-0.5">{req.purpose}</span>
                       {req.activities && (
                         <span className="text-[11px] text-teal-700 truncate max-w-xs block mt-0.5">
                           Atividades: {req.activities}

@@ -203,8 +203,15 @@ export const ReceivedRequests: React.FC<ReceivedRequestsProps> = ({ currentTab, 
                     className="hover:bg-slate-50/80 transition-colors cursor-pointer"
                   >
                     <td className="py-4 px-6">
-                      <span className="font-bold text-slate-900 block">{req.code}</span>
-                      <span className="text-xs text-slate-600 font-semibold block">{req.operatorName}</span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-slate-900">{req.code}</span>
+                        {req.project && (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            {req.project}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-600 font-semibold block mt-0.5">{req.operatorName}</span>
                       {req.requesterRole === 'vistoria_ameta' && (
                         <span className="inline-block mt-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-teal-50 text-teal-700 border border-teal-200">
                           Vistoriador AMETA
@@ -380,9 +387,16 @@ export const ReceivedRequests: React.FC<ReceivedRequestsProps> = ({ currentTab, 
 
               {/* Acionamentos Solicitados */}
               <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-4 space-y-1.5">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-900">
-                  <ClipboardList className="w-4 h-4 text-amber-700" />
-                  <span>Acionamentos Solicitados</span>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-wider text-amber-900">
+                  <div className="flex items-center gap-2">
+                    <ClipboardList className="w-4 h-4 text-amber-700" />
+                    <span>Acionamentos Solicitados</span>
+                  </div>
+                  {detailReq.project && (
+                    <span className="px-2.5 py-0.5 rounded-md text-[11px] font-bold bg-indigo-100 text-indigo-800 normal-case">
+                      Projeto: {detailReq.project}
+                    </span>
+                  )}
                 </div>
                 <p className="text-sm font-semibold text-slate-900 whitespace-pre-line leading-relaxed">
                   {detailReq.purpose}
@@ -544,7 +558,10 @@ export const ReceivedRequests: React.FC<ReceivedRequestsProps> = ({ currentTab, 
             {/* Read-only Acionamentos & Details visible while calculating/approving */}
             <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 text-xs space-y-2">
               <div className="flex items-center justify-between text-[11px] text-amber-900 font-bold uppercase tracking-wider">
-                <span>Acionamentos Solicitados</span>
+                <span>
+                  Acionamentos Solicitados
+                  {activeModalReq.project ? ` • Projeto ${activeModalReq.project}` : ''}
+                </span>
                 <span>
                   {new Date(activeModalReq.startDate).toLocaleDateString('pt-BR')} a{' '}
                   {new Date(activeModalReq.endDate).toLocaleDateString('pt-BR')}

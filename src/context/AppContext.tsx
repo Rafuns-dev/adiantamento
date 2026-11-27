@@ -75,6 +75,7 @@ interface AppContextType {
 
   // Advance Request Actions
   createRequest: (data: {
+    project?: 'Ericsson' | 'Nokia';
     destination: string;
     startDate: string;
     endDate: string;
@@ -564,6 +565,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const createRequest = (data: {
+    project?: 'Ericsson' | 'Nokia';
     destination: string;
     startDate: string;
     endDate: string;
@@ -581,6 +583,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       operatorId: currentUser.id,
       operatorName: currentUser.name,
       requesterRole: currentUser.role,
+      ...(data.project ? { project: data.project } : {}),
       destination: data.destination,
       startDate: data.startDate,
       endDate: data.endDate,

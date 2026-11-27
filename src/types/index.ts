@@ -199,6 +199,7 @@ export interface AdvanceRequest {
   operatorId: string;
   operatorName: string;
   requesterRole?: UserRole;
+  project?: 'Ericsson' | 'Nokia';
   destination: string;
   startDate: string;
   endDate: string;

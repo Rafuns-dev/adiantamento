@@ -55,6 +55,12 @@ export const TimelineModal: React.FC<TimelineModalProps> = ({ request, onClose }
                 <span className="text-slate-500 block text-xs">Status Atual</span>
                 <span className="font-semibold text-indigo-600">{request.status}</span>
               </div>
+              {request.project && (
+                <div>
+                  <span className="text-slate-500 block text-xs">Projeto</span>
+                  <span className="font-semibold text-teal-700">{request.project}</span>
+                </div>
+              )}
             </div>
             {request.activities && (
               <div className="pt-3 border-t border-slate-200">
