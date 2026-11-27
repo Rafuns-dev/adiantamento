@@ -14,7 +14,6 @@ import {
   CheckCircle,
   ChevronLeft,
   ChevronRight,
-  ClipboardList,
   Camera,
   FileSpreadsheet,
   X,
@@ -46,7 +45,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   mobileOpen,
   onCloseMobile,
 }) => {
-  const { requests, cadastros, notasEquipe, currentUser } = useApp();
+  const { requests, notasEquipe, currentUser } = useApp();
 
   if (!currentUser) return null;
 
@@ -59,7 +58,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       r.requesterRole === 'vistoria_ameta' &&
       r.status === 'Aguardando comprovante'
   ).length;
-  const cadastrosPendentes = cadastros.filter((c) => c.status !== 'Concluído').length;
 
   // Equipe de Vistoria – Notas (isolada)
   const vistoriaNotaMenuItems: MenuItem[] = [
@@ -125,12 +123,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const financeAndAdminMenuItems: MenuItem[] = [
     { id: 'fin-dashboard', label: 'Dashboard Fin. & Coord.', icon: <LayoutDashboard className="w-5 h-5" /> },
-    {
-      id: 'cadastros-list',
-      label: 'Cadastros Prestadores',
-      icon: <ClipboardList className="w-5 h-5" />,
-      badge: cadastrosPendentes,
-    },
     {
       id: 'nota-fiscais',
       label: 'Notas fiscais (Vist. Externo)',

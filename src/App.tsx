@@ -25,7 +25,6 @@ import { AccountabilityReview } from './components/finance/AccountabilityReview'
 import { ReportsView } from './components/finance/ReportsView';
 import { UsersManagement } from './components/finance/UsersManagement';
 import { AuditLogView } from './components/finance/AuditLogView';
-import { CadastrosFullView } from './components/admin/CadastrosFullView';
 
 // Team-specific views
 import { NotaTeamDashboard } from './components/teams/NotaTeamDashboard';
@@ -95,13 +94,6 @@ function MainContent() {
     }
 
     switch (currentTab) {
-      // Cadastros Prestadores: apenas Coordenação e Financeiro (admin / financeiro)
-      case 'cadastros-list':
-        return currentUser.role === 'admin' || currentUser.role === 'financeiro' ? (
-          <CadastrosFullView onOpenPublicForm={() => setShowPublicForm(true)} />
-        ) : (
-          <OperatorDashboard setCurrentTab={setCurrentTab} />
-        );
       case 'nota-dashboard':
         return currentUser.role === 'operador' ? (
           <OperatorDashboard setCurrentTab={setCurrentTab} />

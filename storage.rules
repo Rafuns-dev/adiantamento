@@ -37,7 +37,7 @@ service firebase.storage {
     }
 
     function interno() {
-      return eAdmin() || eNota() || eComp();
+      return eAdmin() || eNota() || eComp() || (ativo() && perfil().role == 'operador');
     }
 
     function tamanhoValido() {
@@ -80,6 +80,14 @@ service firebase.storage {
     match /comprovantes/{notaId}/{fileName} {
       allow read: if interno();
       allow create: if (eComp() || eAdmin()) && tamanhoValido() && tipoComprovanteValido();
+      allow update: if false;
+      allow delete: if eAdmin();
+    }
+
+    // Solicitações: solicitacoes/{requestId}/{fileName}
+    match /solicitacoes/{requestId}/{fileName} {
+      allow read: if interno();
+      allow create: if interno() && tamanhoValido();
       allow update: if false;
       allow delete: if eAdmin();
     }

@@ -3,7 +3,7 @@ import { useApp } from '../context/AppContext';
 import { Lock, Mail, ArrowRight } from 'lucide-react';
 
 export const LoginScreen: React.FC = () => {
-  const { login, loginWithGoogle, syncError, dismissSyncError } = useApp();
+  const { login, syncError, dismissSyncError } = useApp();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -18,17 +18,6 @@ export const LoginScreen: React.FC = () => {
     setSubmitting(false);
     if (!result.ok) {
       setError(result.error || 'E-mail ou senha inválidos, ou conta desativada.');
-    }
-  };
-
-  const handleGoogle = async () => {
-    setError('');
-    dismissSyncError();
-    setSubmitting(true);
-    const result = await loginWithGoogle();
-    setSubmitting(false);
-    if (!result.ok) {
-      setError(result.error || 'Falha ao entrar com o Google.');
     }
   };
 
@@ -111,21 +100,6 @@ export const LoginScreen: React.FC = () => {
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>
-
-        <div className="flex items-center gap-3 text-[11px] text-slate-500">
-          <div className="flex-1 h-px bg-slate-800" />
-          <span>ou</span>
-          <div className="flex-1 h-px bg-slate-800" />
-        </div>
-
-        <button
-          type="button"
-          onClick={handleGoogle}
-          disabled={submitting}
-          className="w-full py-3 bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-900 font-bold rounded-2xl text-sm transition-all"
-        >
-          Entrar com Google
-        </button>
       </div>
     </div>
   );
