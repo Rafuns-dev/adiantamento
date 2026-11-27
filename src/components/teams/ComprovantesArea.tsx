@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { AdvanceRequest, ComprovanteServico, ExpenseCategory, NotaFiscalEquipe } from '../../types';
 import { DocumentViewerModal } from '../DocumentViewerModal';
-import { downloadFile, readFileAsDataUrl } from '../../utils/fileHelpers';
+import { downloadFile, isImageFile, isPdfFile, prepareUploadFile } from '../../utils/fileHelpers';
 import {
   Camera,
   FileText,
@@ -145,24 +145,23 @@ export const ComprovantesArea: React.FC = () => {
     if (files.length === 0) return;
 
     const validItems: Array<{ file: File; previewUrl?: string }> = [];
-    for (const file of files) {
-      const validMime =
-        file.type === 'application/pdf' ||
-        file.type === 'image/jpeg' ||
-        file.type === 'image/png';
-      if (!validMime) {
-        setErrorMsg(`Arquivo "${file.name}" rejeitado. Apenas PDF, JPG ou PNG são permitidos.`);
+    for (const rawFile of files) {
+      const isImg = isImageFile(rawFile);
+      const isPdf = isPdfFile(rawFile);
+      if (!isImg && !isPdf) {
+        setErrorMsg(`Arquivo "${rawFile.name}" rejeitado. Envie foto (JPG, PNG, WEBP) ou PDF.`);
         return;
       }
-      if (file.size > 10 * 1024 * 1024) {
-        setErrorMsg(`Arquivo "${file.name}" ultrapassa o limite de 10 MB.`);
+      if (!isImg && rawFile.size > 10 * 1024 * 1024) {
+        setErrorMsg(`PDF "${rawFile.name}" ultrapassa o limite de 10 MB.`);
         return;
       }
-      let previewUrl: string | undefined;
-      if (file.type.startsWith('image/') || file.type === 'application/pdf') {
-        previewUrl = await readFileAsDataUrl(file);
+      if (isImg && rawFile.size > 25 * 1024 * 1024) {
+        setErrorMsg(`Foto "${rawFile.name}" ultrapassa o limite de 25 MB.`);
+        return;
       }
-      validItems.push({ file, previewUrl });
+      const prepared = await prepareUploadFile(rawFile, 1280, 0.74);
+      validItems.push({ file: prepared.file, previewUrl: prepared.dataUrl });
     }
 
     setSelectedFiles((prev) => [...prev, ...validItems]);
@@ -280,7 +279,7 @@ export const ComprovantesArea: React.FC = () => {
 
   const handleViewComprovante = async (comp: ComprovanteServico) => {
     let data = comp.arquivoData;
-    if (!data && comp.arquivoPath) {
+    if (!data && comp.arquivoPath && !comp.arquivoPath.startsWith('inline/')) {
       const authUrl = await resolveAuthenticatedStorageUrl(comp.arquivoPath);
       if (authUrl) data = authUrl;
     }
@@ -324,7 +323,7 @@ export const ComprovantesArea: React.FC = () => {
 
   const handleDownloadComprovante = async (comp: ComprovanteServico) => {
     let data = comp.arquivoData;
-    if (!data && comp.arquivoPath) {
+    if (!data && comp.arquivoPath && !comp.arquivoPath.startsWith('inline/')) {
       const authUrl = await resolveAuthenticatedStorageUrl(comp.arquivoPath);
       if (authUrl) data = authUrl;
     }
@@ -713,7 +712,7 @@ export const ComprovantesArea: React.FC = () => {
                           <input
                             type="file"
                             multiple
-                            accept=".pdf,.jpg,.jpeg,.png"
+                            accept="image/*,.pdf"
                             onChange={handleFilesSelected}
                             className="w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 cursor-pointer bg-slate-50 border border-slate-200 rounded-xl p-1.5"
                           />
@@ -1197,7 +1196,7 @@ export const ComprovantesArea: React.FC = () => {
                           <input
                             type="file"
                             multiple
-                            accept=".pdf,.jpg,.jpeg,.png"
+                            accept="image/*,.pdf"
                             onChange={handleFilesSelected}
                             className="w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 cursor-pointer bg-slate-50 border border-slate-200 rounded-xl p-1.5"
                           />

@@ -19,6 +19,10 @@
    - Criação permitida para `interno()` (inclui downloads, notas, comprovantes).
    - Leitura restrita a `interno()`.
    - Atualização e exclusão proibidas.
+6. **Notificações (`notificacoes/{id}`)**:
+   - Leitura (`get`, `list`) restrita exclusivamente aos destinatários (`recipientUid == request.auth.uid` ou `perfil().role in recipientRoles`).
+   - Criação permitida para `interno()` exigindo `senderUid == request.auth.uid`, `readBy.size() == 0` e `criadoEm == request.time`.
+   - Atualização permitida apenas para destinatários e restrita exclusivamente ao campo `readBy` (adicionando o próprio `request.auth.uid`).
 
 ## 2. "Dirty Dozen" Payloads (Tentativas de Ataque Bloqueadas)
 1. **Visitante anônimo lendo `notas`** -> `PERMISSION_DENIED` (`interno()` exige login ativo).

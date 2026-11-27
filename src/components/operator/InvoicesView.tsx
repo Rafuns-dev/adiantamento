@@ -4,7 +4,7 @@ import { StatusBadge } from '../StatusBadge';
 import { DocumentViewerModal } from '../DocumentViewerModal';
 import { FileCheck2, Upload, AlertCircle, CheckCircle2, FileText, Send, Eye } from 'lucide-react';
 import { AdvanceRequest } from '../../types';
-import { readFileAsDataUrl } from '../../utils/fileHelpers';
+import { isXmlFile, prepareUploadFile } from '../../utils/fileHelpers';
 
 export const InvoicesView: React.FC = () => {
   const { requests, currentUser, submitInvoice } = useApp();
@@ -16,10 +16,15 @@ export const InvoicesView: React.FC = () => {
   const [cnpj, setCnpj] = useState('');
   const [emissionDate, setEmissionDate] = useState('');
   const [amount, setAmount] = useState('');
+  const [paymentPreference, setPaymentPreference] = useState<'PIX' | 'Depósito'>('PIX');
+  const [paymentDetails, setPaymentDetails] = useState('');
   const [fileName, setFileName] = useState('');
   const [fileData, setFileData] = useState<string | undefined>(undefined);
   const [xmlFileName, setXmlFileName] = useState('');
   const [xmlData, setXmlData] = useState<string | undefined>(undefined);
+  const [processingFile, setProcessingFile] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
   const [successMsg, setSuccessMsg] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<{
     title: string;
@@ -38,44 +43,71 @@ export const InvoicesView: React.FC = () => {
     setCnpj(req.invoice?.cnpj || currentUser.cpfCnpj);
     setEmissionDate(req.invoice?.emissionDate || new Date().toISOString().substring(0, 10));
     setAmount(req.invoice?.amount ? String(req.invoice.amount) : String(req.amountRequested));
+    setPaymentPreference(req.invoice?.paymentPreference || 'PIX');
+    setPaymentDetails(req.invoice?.paymentDetails || '');
     setFileName(req.invoice?.pdfUrl || '');
     setFileData(req.invoice?.pdfData);
     setXmlFileName(req.invoice?.xmlUrl || '');
     setXmlData(req.invoice?.xmlData);
+    setFormError('');
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    for (const f of files) {
-      const dataUrl = await readFileAsDataUrl(f);
-      if (f.name.toLowerCase().endsWith('.xml')) {
-        setXmlFileName(f.name);
-        setXmlData(dataUrl);
-      } else {
-        setFileName(f.name);
-        setFileData(dataUrl);
+    if (files.length === 0) return;
+    setFormError('');
+    setProcessingFile(true);
+    try {
+      for (const f of files) {
+        if (isXmlFile(f)) {
+          const prepared = await prepareUploadFile(f);
+          setXmlFileName(f.name);
+          setXmlData(prepared.dataUrl);
+        } else {
+          const prepared = await prepareUploadFile(f, 1300, 0.76);
+          setFileName(prepared.file.name || f.name);
+          setFileData(prepared.dataUrl);
+        }
       }
+    } catch {
+      setFormError('Não foi possível ler o arquivo selecionado. Tente novamente.');
+    } finally {
+      setProcessingFile(false);
+      e.target.value = '';
     }
   };
 
-  const handleSendInvoice = (e: React.FormEvent) => {
+  const handleSendInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeRequest) return;
-    submitInvoice(activeRequest.id, {
+    if (!activeRequest || processingFile || submitting) return;
+    if (!fileData && !xmlData && !activeRequest.invoice?.pdfData && !activeRequest.invoice?.xmlData && !fileName) {
+      setFormError('Anexe a foto, PDF ou XML da Nota Fiscal antes de enviar.');
+      return;
+    }
+    setFormError('');
+    setSubmitting(true);
+    const ok = await submitInvoice(activeRequest.id, {
       number: invoiceNumber,
       cnpj,
       emissionDate,
       amount: parseFloat(amount),
+      paymentPreference,
+      paymentDetails: paymentDetails.trim(),
       pdfUrl: fileName || 'nota_fiscal.pdf',
       pdfData: fileData,
       xmlUrl: xmlFileName || undefined,
       xmlData: xmlData
     });
+    setSubmitting(false);
+    if (!ok) {
+      setFormError('Falha ao salvar a Nota Fiscal no servidor. Verifique a conexão e tente novamente.');
+      return;
+    }
     setSuccessMsg(true);
+    setActiveRequest(null);
     setTimeout(() => {
       setSuccessMsg(false);
-      setActiveRequest(null);
-    }, 1500);
+    }, 3000);
   };
 
   return (
@@ -149,6 +181,22 @@ export const InvoicesView: React.FC = () => {
                             {req.invoice?.status}
                           </span>
                         </div>
+                        {req.invoice?.paymentPreference && (
+                          <div className="pt-1.5 mt-1.5 border-t border-slate-200/80 space-y-1">
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">Recebimento:</span>
+                              <span className="font-bold text-slate-800">{req.invoice.paymentPreference}</span>
+                            </div>
+                            {req.invoice.paymentDetails && (
+                              <div className="text-[11px] bg-white border border-slate-200 rounded-lg p-2 text-slate-700 whitespace-pre-line">
+                                <span className="font-semibold text-slate-500 block mb-0.5">
+                                  {req.invoice.paymentPreference === 'PIX' ? 'Chave PIX:' : 'Dados Bancários:'}
+                                </span>
+                                {req.invoice.paymentDetails}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {req.invoice?.reviewComment && (
                           <div className="mt-1 p-2 bg-red-50 text-red-800 rounded-lg">
                             <span className="font-semibold block">Motivo devolução:</span>
@@ -175,6 +223,12 @@ export const InvoicesView: React.FC = () => {
                           { label: 'CNPJ Emissor', value: req.invoice?.cnpj || '' },
                           { label: 'Data de Emissão', value: req.invoice?.emissionDate || '' },
                           { label: 'Valor', value: `R$ ${(req.invoice?.amount || 0).toFixed(2)}` },
+                          ...(req.invoice?.paymentPreference
+                            ? [{ label: 'Forma de Recebimento', value: req.invoice.paymentPreference }]
+                            : []),
+                          ...(req.invoice?.paymentDetails
+                            ? [{ label: req.invoice.paymentPreference === 'PIX' ? 'Chave PIX' : 'Dados Bancários', value: req.invoice.paymentDetails }]
+                            : []),
                           { label: 'Status', value: req.invoice?.status || '' }
                         ]
                       })}
@@ -283,23 +337,101 @@ export const InvoicesView: React.FC = () => {
                 </div>
               </div>
 
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+                <div>
+                  <label className="block font-bold uppercase tracking-wider text-slate-700 mb-2">
+                    Como deseja receber? <span className="text-red-500">*</span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentPreference('PIX')}
+                      className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all ${
+                        paymentPreference === 'PIX'
+                          ? 'bg-teal-600 border-teal-600 text-white shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      PIX
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentPreference('Depósito')}
+                      className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all ${
+                        paymentPreference === 'Depósito'
+                          ? 'bg-teal-600 border-teal-600 text-white shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      Depósito Bancário
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                    {paymentPreference === 'PIX'
+                      ? 'Dados / Chave PIX'
+                      : 'Dados Bancários para Depósito'}{' '}
+                    <span className="text-red-500">*</span>
+                  </label>
+                  {paymentPreference === 'PIX' ? (
+                    <input
+                      type="text"
+                      required
+                      placeholder="Informe a chave PIX (CPF, CNPJ, e-mail, celular ou aleatória) e nome do titular"
+                      value={paymentDetails}
+                      onChange={e => setPaymentDetails(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    />
+                  ) : (
+                    <textarea
+                      rows={3}
+                      required
+                      placeholder="Informe Banco, Agência, Conta (Corrente/Poupança), CPF/CNPJ e Nome do Titular"
+                      value={paymentDetails}
+                      onChange={e => setPaymentDetails(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    />
+                  )}
+                </div>
+              </div>
+
+              {formError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 flex items-center gap-2 font-semibold">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                  Anexar Arquivo PDF / XML <span className="text-red-500">*</span>
+                  Anexar Foto, PDF ou XML da Nota Fiscal <span className="text-red-500">*</span>
                 </label>
                 <div className="border-2 border-dashed border-teal-300 rounded-xl p-5 text-center bg-teal-50/30 hover:bg-teal-50 transition-colors cursor-pointer">
                   <Upload className="w-8 h-8 text-teal-600 mx-auto mb-2" />
-                  <span className="text-xs text-slate-700 font-bold block">Clique para selecionar arquivos do computador</span>
+                  <span className="text-xs text-slate-700 font-bold block">
+                    {processingFile ? 'Processando imagem...' : 'Clique para selecionar foto, PDF ou XML'}
+                  </span>
                   <span className="text-[10px] text-slate-500 block mt-1">
-                    PDF / XML suportados ({fileName || 'Nenhum PDF'}{xmlFileName ? ` • ${xmlFileName}` : ''})
+                    JPG, PNG, PDF ou XML suportados ({fileName || 'Nenhum arquivo'}{xmlFileName ? ` • ${xmlFileName}` : ''})
                   </span>
                   <input
                     type="file"
                     multiple
-                    accept=".pdf,.xml,.jpg,.png"
+                    accept="image/*,.pdf,.xml"
                     onChange={handleFileChange}
                     className="mt-3 w-full text-xs text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-teal-600 file:text-white hover:file:bg-teal-500 cursor-pointer"
                   />
+                  {fileData && fileData.startsWith('data:image/') && (
+                    <div className="mt-3 flex flex-col items-center">
+                      <img
+                        src={fileData}
+                        alt={fileName}
+                        className="max-h-32 rounded-lg border border-slate-200 object-contain bg-white shadow-xs"
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -313,10 +445,11 @@ export const InvoicesView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-bold shadow-md flex items-center gap-2"
+                  disabled={processingFile || submitting}
+                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:opacity-60 text-white font-bold shadow-md flex items-center gap-2"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Enviar para Conferência</span>
+                  <span>{submitting ? 'Enviando...' : 'Enviar para Conferência'}</span>
                 </button>
               </div>
             </form>

@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { StatusBadge } from '../StatusBadge';
-import { Receipt, Plus, Trash2, Calculator, CheckCircle2, Eye, X, Lock } from 'lucide-react';
+import { Receipt, Plus, Trash2, Calculator, CheckCircle2, Eye, X, Lock, AlertCircle } from 'lucide-react';
 import { AdvanceRequest, ExpenseCategory, ExpenseItem } from '../../types';
 import { DocumentViewerModal } from '../DocumentViewerModal';
-import { readFileAsDataUrl } from '../../utils/fileHelpers';
+import { prepareUploadFile } from '../../utils/fileHelpers';
 
 export const AccountabilityView: React.FC = () => {
   const { requests, currentUser, submitAccountability } = useApp();
@@ -30,6 +30,10 @@ export const AccountabilityView: React.FC = () => {
   const [description, setDescription] = useState('');
   const [receiptUrl, setReceiptUrl] = useState('');
   const [receiptData, setReceiptData] = useState<string | undefined>(undefined);
+  const [readingFile, setReadingFile] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [viewingExpense, setViewingExpense] = useState<ExpenseItem | null>(null);
 
   const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
@@ -44,11 +48,12 @@ export const AccountabilityView: React.FC = () => {
     setSelectedReqId(req.id);
     setExpenses(req.accountability?.expenses || []);
     setSuccessMsg(false);
+    setErrorMsg('');
   };
 
   const handleAddExpense = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!amount || !description) return;
+    if (!amount || !description || readingFile) return;
     const newItem: ExpenseItem = {
       id: 'exp-' + Date.now() + Math.random().toString(36).substr(2, 3),
       category,
@@ -63,6 +68,7 @@ export const AccountabilityView: React.FC = () => {
     setDescription('');
     setReceiptUrl('');
     setReceiptData(undefined);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleRemoveExpense = (id: string) => {
@@ -78,9 +84,16 @@ export const AccountabilityView: React.FC = () => {
   const advanceAmount = selectedReq?.amountRequested || 0;
   const balanceDiff = advanceAmount - totalExpenses;
 
-  const handleSubmitAccountability = () => {
-    if (!selectedReq || expenses.length === 0 || isAlreadySent) return;
-    submitAccountability(selectedReq.id, expenses);
+  const handleSubmitAccountability = async () => {
+    if (!selectedReq || expenses.length === 0 || isAlreadySent || submitting) return;
+    setErrorMsg('');
+    setSubmitting(true);
+    const ok = await submitAccountability(selectedReq.id, expenses);
+    setSubmitting(false);
+    if (!ok) {
+      setErrorMsg('Não foi possível salvar os comprovantes no Firebase. Tente reduzir o tamanho ou quantidade de anexos.');
+      return;
+    }
     setSuccessMsg(true);
     setTimeout(() => {
       setSuccessMsg(false);
@@ -107,6 +120,13 @@ export const AccountabilityView: React.FC = () => {
           <span className="text-sm font-semibold">
             Prestação de contas enviada com sucesso para análise do financeiro!
           </span>
+        </div>
+      )}
+
+      {errorMsg && (
+        <div className="bg-red-50 border border-red-200 text-red-800 p-4 rounded-2xl flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+          <span className="text-sm font-semibold">{errorMsg}</span>
         </div>
       )}
 
@@ -250,22 +270,35 @@ export const AccountabilityView: React.FC = () => {
 
                     <div>
                       <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
-                        Comprovante (Arquivo)
+                        Comprovante (Foto ou Arquivo)
                       </label>
                       <input
+                        ref={fileInputRef}
                         type="file"
-                        accept=".pdf,.jpg,.jpeg,.png,.xml"
+                        accept="image/*,.pdf,.xml"
                         onChange={async (e) => {
                           const file = e.target.files?.[0];
-                          if (file) {
-                            setReceiptUrl(file.name);
-                            const dataUrl = await readFileAsDataUrl(file);
-                            setReceiptData(dataUrl);
+                          if (!file) return;
+                          setErrorMsg('');
+                          setReadingFile(true);
+                          try {
+                            const prepared = await prepareUploadFile(file, 1200, 0.72);
+                            setReceiptUrl(prepared.file.name || file.name);
+                            setReceiptData(prepared.dataUrl);
+                          } catch {
+                            setErrorMsg('Não foi possível ler a imagem/arquivo selecionado.');
+                          } finally {
+                            setReadingFile(false);
                           }
                         }}
                         className="w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 cursor-pointer bg-slate-50 border border-slate-200 rounded-xl p-1.5"
                       />
-                      {receiptUrl && (
+                      {readingFile && (
+                        <span className="text-[10px] text-amber-700 font-semibold mt-1 block">
+                          Processando foto...
+                        </span>
+                      )}
+                      {!readingFile && receiptUrl && (
                         <span className="text-[10px] text-teal-700 font-semibold mt-1 block">
                           Selecionado: {receiptUrl}
                         </span>
@@ -289,10 +322,11 @@ export const AccountabilityView: React.FC = () => {
                     <div className="sm:col-span-2 flex justify-end">
                       <button
                         type="submit"
-                        className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-md transition-colors"
+                        disabled={readingFile}
+                        className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-md transition-colors"
                       >
                         <Plus className="w-4 h-4" />
-                        <span>Adicionar Despesa</span>
+                        <span>{readingFile ? 'Processando foto...' : 'Adicionar Despesa'}</span>
                       </button>
                     </div>
                   </form>
@@ -434,10 +468,10 @@ export const AccountabilityView: React.FC = () => {
                   <button
                     type="button"
                     onClick={handleSubmitAccountability}
-                    disabled={expenses.length === 0}
+                    disabled={expenses.length === 0 || submitting || readingFile}
                     className="w-full py-3 bg-teal-600 hover:bg-teal-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-teal-900/40 transition-all"
                   >
-                    Enviar Prestação de Contas
+                    {submitting ? 'Enviando comprovantes...' : 'Enviar Prestação de Contas'}
                   </button>
                 )}
               </div>

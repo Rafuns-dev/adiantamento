@@ -3,7 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { StatusBadge } from '../StatusBadge';
 import { DollarSign, Send, Upload, CheckCircle2, Calendar, Search, X } from 'lucide-react';
 import { AdvanceRequest, PaymentData } from '../../types';
-import { readFileAsDataUrl } from '../../utils/fileHelpers';
+import { prepareUploadFile } from '../../utils/fileHelpers';
 
 export const PaymentsManagement: React.FC = () => {
   const { requests, registerPayment } = useApp();
@@ -37,6 +37,7 @@ export const PaymentsManagement: React.FC = () => {
     const defaultAmount =
       req.amountRequested > 0 ? req.amountRequested : req.invoice?.amount || 0;
     setAmountPaid(defaultAmount > 0 ? String(defaultAmount) : '');
+    setMethod(req.invoice?.paymentPreference === 'Depósito' ? 'Transferência Bancária' : 'PIX');
     setTransactionId('PIX' + Math.floor(Math.random() * 1000000000));
     setReceiptUrl('comprovante_banco.pdf');
     setReceiptData(undefined);
@@ -45,15 +46,15 @@ export const PaymentsManagement: React.FC = () => {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setReceiptUrl(file.name);
-    const dataUrl = await readFileAsDataUrl(file);
-    setReceiptData(dataUrl);
+    const prepared = await prepareUploadFile(file, 1280, 0.75);
+    setReceiptUrl(prepared.file.name || file.name);
+    setReceiptData(prepared.dataUrl);
   };
 
-  const handlePaymentSubmit = (e: React.FormEvent) => {
+  const handlePaymentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeReq) return;
-    registerPayment(activeReq.id, {
+    const ok = await registerPayment(activeReq.id, {
       amountPaid: parseFloat(amountPaid),
       date,
       method,
@@ -61,11 +62,12 @@ export const PaymentsManagement: React.FC = () => {
       receiptUrl,
       receiptData
     });
+    if (!ok) return;
     setSuccessMsg(true);
+    setActiveReq(null);
     setTimeout(() => {
       setSuccessMsg(false);
-      setActiveReq(null);
-    }, 1500);
+    }, 2500);
   };
 
   return (
@@ -160,6 +162,22 @@ export const PaymentsManagement: React.FC = () => {
                         : 'A definir'}
                     </span>
                   </div>
+                  {req.invoice?.paymentPreference && (
+                    <div className="pt-2 border-t border-slate-200 space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Recebimento Solicitado:</span>
+                        <span className="font-bold text-slate-900">{req.invoice.paymentPreference}</span>
+                      </div>
+                      {req.invoice.paymentDetails && (
+                        <div className="bg-white border border-slate-200 rounded-lg p-2 text-[11px] text-slate-700 whitespace-pre-line">
+                          <span className="font-semibold text-slate-500 block mb-0.5">
+                            {req.invoice.paymentPreference === 'PIX' ? 'Dados / Chave PIX:' : 'Dados Bancários:'}
+                          </span>
+                          {req.invoice.paymentDetails}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -186,6 +204,24 @@ export const PaymentsManagement: React.FC = () => {
             </div>
 
             <form onSubmit={handlePaymentSubmit} className="space-y-4 text-xs">
+              {activeReq.invoice?.paymentPreference && (
+                <div className="bg-teal-50 border border-teal-200 rounded-xl p-3.5 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold uppercase tracking-wider text-teal-800">
+                      Dados informados na Nota Fiscal
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-teal-600 text-white font-bold text-[10px]">
+                      {activeReq.invoice.paymentPreference}
+                    </span>
+                  </div>
+                  {activeReq.invoice.paymentDetails && (
+                    <p className="text-xs text-slate-800 font-medium whitespace-pre-line pt-1">
+                      {activeReq.invoice.paymentDetails}
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1.5">
                   Valor Efetivamente Pago (R$) <span className="text-red-500">*</span>
@@ -251,7 +287,7 @@ export const PaymentsManagement: React.FC = () => {
                   <Upload className="w-5 h-5 text-teal-600 mx-auto mb-1" />
                   <input
                     type="file"
-                    accept=".pdf,.jpg,.jpeg,.png"
+                    accept="image/*,.pdf"
                     onChange={handleFileChange}
                     className="w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-teal-600 file:text-white hover:file:bg-teal-500 cursor-pointer"
                   />

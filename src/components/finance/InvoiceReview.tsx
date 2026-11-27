@@ -146,6 +146,22 @@ export const InvoiceReview: React.FC = () => {
                         R$ {inv.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                       </span>
                     </div>
+                    {inv.paymentPreference && (
+                      <div className="pt-2 border-t border-slate-200 space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Recebimento Preferido:</span>
+                          <span className="font-bold text-slate-900">{inv.paymentPreference}</span>
+                        </div>
+                        {inv.paymentDetails && (
+                          <div className="bg-white border border-slate-200 rounded-lg p-2 text-[11px] text-slate-700 whitespace-pre-line">
+                            <span className="font-semibold text-slate-500 block mb-0.5">
+                              {inv.paymentPreference === 'PIX' ? 'Dados / Chave PIX:' : 'Dados Bancários:'}
+                            </span>
+                            {inv.paymentDetails}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -163,7 +179,13 @@ export const InvoiceReview: React.FC = () => {
                           { label: 'Operador', value: req.operatorName },
                           { label: 'NF nº', value: inv.number },
                           { label: 'CNPJ', value: inv.cnpj },
-                          { label: 'Valor NF', value: `R$ ${inv.amount.toFixed(2)}` }
+                          { label: 'Valor NF', value: `R$ ${inv.amount.toFixed(2)}` },
+                          ...(inv.paymentPreference
+                            ? [{ label: 'Recebimento', value: inv.paymentPreference }]
+                            : []),
+                          ...(inv.paymentDetails
+                            ? [{ label: inv.paymentPreference === 'PIX' ? 'Dados / Chave PIX' : 'Dados Bancários', value: inv.paymentDetails }]
+                            : [])
                         ]
                       })
                     }

@@ -7,6 +7,101 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+export function isImageFile(file: File): boolean {
+  if (file.type && file.type.startsWith('image/')) return true;
+  return /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(file.name);
+}
+
+export function isPdfFile(file: File): boolean {
+  if (file.type === 'application/pdf') return true;
+  return /\.pdf$/i.test(file.name);
+}
+
+export function isXmlFile(file: File): boolean {
+  if (file.type === 'application/xml' || file.type === 'text/xml') return true;
+  return /\.xml$/i.test(file.name);
+}
+
+/**
+ * Redimensiona e comprime imagens (fotos de celular/câmera) para JPEG leve (~100-250 KB),
+ * mantendo ótima legibilidade para notas fiscais e comprovantes e garantindo upload rápido.
+ */
+export async function compressImageToDataUrl(
+  file: File,
+  maxDimension = 1400,
+  quality = 0.78
+): Promise<{ dataUrl: string; file: File }> {
+  const rawDataUrl = await readFileAsDataUrl(file);
+  if (typeof document === 'undefined') {
+    return { dataUrl: rawDataUrl, file };
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let { width, height } = img;
+        if (!width || !height) {
+          resolve({ dataUrl: rawDataUrl, file });
+          return;
+        }
+        if (width > maxDimension || height > maxDimension) {
+          if (width >= height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ dataUrl: rawDataUrl, file });
+          return;
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const jpegDataUrl = canvas.toDataURL('image/jpeg', quality);
+        const blob = dataUrlToBlob(jpegDataUrl);
+        if (!blob) {
+          resolve({ dataUrl: rawDataUrl, file });
+          return;
+        }
+
+        const baseName = file.name.replace(/\.[^.]+$/, '') || 'imagem';
+        const compressedFile = new File([blob], `${baseName}.jpg`, { type: 'image/jpeg' });
+        if (compressedFile.size >= file.size && (file.type === 'image/jpeg' || file.type === 'image/png')) {
+          resolve({ dataUrl: rawDataUrl, file });
+          return;
+        }
+        resolve({ dataUrl: jpegDataUrl, file: compressedFile });
+      } catch {
+        resolve({ dataUrl: rawDataUrl, file });
+      }
+    };
+    img.onerror = () => resolve({ dataUrl: rawDataUrl, file });
+    img.src = rawDataUrl;
+  });
+}
+
+export async function prepareUploadFile(
+  file: File,
+  maxDimension = 1400,
+  quality = 0.78
+): Promise<{ dataUrl: string; file: File }> {
+  if (isImageFile(file)) {
+    return compressImageToDataUrl(file, maxDimension, quality);
+  }
+  const dataUrl = await readFileAsDataUrl(file);
+  return { dataUrl, file };
+}
+
 export function dataUrlToBlob(dataUrl: string): Blob | null {
   try {
     const [header, base64] = dataUrl.split(',');

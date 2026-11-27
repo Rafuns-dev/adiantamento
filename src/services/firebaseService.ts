@@ -10,6 +10,8 @@ import {
   orderBy,
   serverTimestamp,
   Timestamp,
+  where,
+  arrayUnion,
 } from 'firebase/firestore';
 import {
   ref,
@@ -26,6 +28,8 @@ import {
   AuditoriaEntry,
   User,
   AdvanceRequest,
+  AppNotification,
+  UserRole,
 } from '../types';
 
 /**
@@ -81,6 +85,15 @@ export async function uploadAuthenticatedFile(
       contentType: file.type || 'application/octet-stream',
     });
 
+    const timeout = setTimeout(() => {
+      try {
+        task.cancel();
+      } catch {
+        // ignore cancel error
+      }
+      reject(new Error('Tempo limite excedido ao enviar arquivo para o Storage.'));
+    }, 15000);
+
     task.on(
       'state_changed',
       (snap) => {
@@ -88,8 +101,14 @@ export async function uploadAuthenticatedFile(
           onProgress(Math.round((snap.bytesTransferred / snap.totalBytes) * 100));
         }
       },
-      (error) => reject(error),
-      () => resolve()
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      }
     );
   });
 
@@ -110,9 +129,10 @@ const MIME_EXTENSIONS: Record<string, string> = {
 };
 
 /**
- * Se `value` for um data URL (base64), envia o arquivo para o Storage e devolve
- * `storage:<caminho>`. Qualquer outro valor (inclusive um `storage:` já existente) é mantido.
- * Isso evita estourar o limite de 1 MB por documento do Firestore.
+ * Envia o arquivo (data URL) para o Firebase Storage e devolve `storage:<caminho>`.
+ * Se o Storage recusar (ex.: CORS ou regras pendentes no console) e o arquivo já estiver
+ * comprimido em tamanho seguro para o Firestore (<= 650 KB), mantém o data URL embutido
+ * para garantir que fotos de comprovantes e notas fiscais não sejam perdidas.
  */
 async function externalizeDataUrl(
   requestId: string,
@@ -126,8 +146,22 @@ async function externalizeDataUrl(
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2) + Date.now().toString(36);
   const path = `solicitacoes/${requestId}/${uuid}${ext}`;
-  await uploadString(ref(storage, path), value, 'data_url');
-  return `${STORAGE_REF_PREFIX}${path}`;
+
+  try {
+    await Promise.race([
+      uploadString(ref(storage, path), value, 'data_url'),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout no upload para Storage')), 10000)
+      ),
+    ]);
+    return `${STORAGE_REF_PREFIX}${path}`;
+  } catch (err) {
+    if (value.length <= 650_000) {
+      console.warn('Upload no Storage falhou; salvando anexo comprimido no Firestore:', err);
+      return value;
+    }
+    throw err;
+  }
 }
 
 /** Envia ao Storage todos os anexos (NF, XML, comprovantes) ainda em base64 de uma solicitação. */
@@ -169,12 +203,15 @@ export async function uploadRequestFiles(req: AdvanceRequest): Promise<AdvanceRe
 }
 
 export async function getAuthenticatedDownloadUrl(arquivoPath: string): Promise<string> {
+  if (arquivoPath.startsWith('inline/')) {
+    return '';
+  }
   const storageRef = ref(storage, arquivoPath);
   return getDownloadURL(storageRef);
 }
 
 export async function deleteStorageFile(arquivoPath?: string): Promise<void> {
-  if (!arquivoPath) return;
+  if (!arquivoPath || arquivoPath.startsWith('inline/')) return;
   try {
     await deleteObject(ref(storage, arquivoPath));
   } catch (err) {
@@ -287,7 +324,7 @@ export async function excluirNotaFirestore(id: string, arquivoPath?: string): Pr
 }
 
 export async function criarComprovanteFirestore(
-  comp: Omit<ComprovanteServico, 'criadoEm' | 'arquivoData'>
+  comp: Omit<ComprovanteServico, 'criadoEm'>
 ): Promise<void> {
   const path = `comprovantes/${comp.id}`;
   try {
@@ -310,6 +347,7 @@ export async function criarComprovanteFirestore(
     if (comp.categoria) payload.categoria = comp.categoria;
     if (comp.valor !== undefined && !Number.isNaN(comp.valor)) payload.valor = Number(comp.valor);
     if (comp.arquivoNome) payload.arquivoNome = comp.arquivoNome.slice(0, 250);
+    if (comp.arquivoData) payload.arquivoData = comp.arquivoData;
 
     await setDoc(doc(db, 'comprovantes', comp.id), payload);
   } catch (err) {
@@ -405,13 +443,58 @@ export async function upsertRequestFirestore(req: AdvanceRequest): Promise<void>
   const path = `solicitacoes/${req.id}`;
   try {
     // `stripUndefined` garante que campos opcionais vazios não façam o Firestore recusar o documento.
-    await setDoc(doc(db, 'solicitacoes', req.id), stripUndefined({ ...req }));
+    const payload = stripUndefined({ ...req });
+    const serializedBytes = new Blob([JSON.stringify(payload)]).size;
+    if (serializedBytes > 980_000) {
+      throw new Error(
+        'Os anexos ultrapassam o limite do banco e o Storage recusou o envio. Reduza a quantidade de arquivos ou publique as regras do Storage no Firebase Console.'
+      );
+    }
+    await setDoc(doc(db, 'solicitacoes', req.id), payload);
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
   }
 }
 
+export async function criarNotificacaoFirestore(params: {
+  id: string;
+  title: string;
+  message: string;
+  date: string;
+  recipientUid?: string;
+  recipientRoles?: UserRole[];
+  senderUid: string;
+}): Promise<void> {
+  const path = `notificacoes/${params.id}`;
+  try {
+    await setDoc(doc(db, 'notificacoes', params.id), {
+      title: params.title.slice(0, 120),
+      message: params.message.slice(0, 500),
+      date: params.date.slice(0, 40),
+      recipientUid: (params.recipientUid || '').slice(0, 128),
+      recipientRoles: (params.recipientRoles || []).slice(0, 5),
+      readBy: [],
+      senderUid: params.senderUid.slice(0, 128),
+      criadoEm: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}
+
+export async function marcarNotificacaoLidaFirestore(id: string, uid: string): Promise<void> {
+  const path = `notificacoes/${id}`;
+  try {
+    await updateDoc(doc(db, 'notificacoes', id), {
+      readBy: arrayUnion(uid),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
 export interface SubscribeCallbacks {
+  uid: string;
   role: User['role'];
   onCadastros: (items: CadastroPrestador[]) => void;
   onNotas: (items: NotaFiscalEquipe[]) => void;
@@ -419,6 +502,7 @@ export interface SubscribeCallbacks {
   onAuditoria: (items: AuditoriaEntry[]) => void;
   onRequests: (items: AdvanceRequest[]) => void;
   onUsers: (items: User[]) => void;
+  onNotifications: (items: AppNotification[]) => void;
   /** Chamado quando uma leitura em tempo real falha (ex.: regra de segurança negou o acesso). */
   onError: (collectionName: string, error: unknown) => void;
 }
@@ -570,6 +654,67 @@ export function subscribeTeamCollections(callbacks: SubscribeCallbacks): () => v
       )
     );
   }
+
+  // Notificações direcionadas exclusivamente ao usuário logado (por UID ou pelo seu perfil)
+  let directNotifs: AppNotification[] = [];
+  let roleNotifs: AppNotification[] = [];
+
+  const emitMergedNotifications = () => {
+    const byId = new Map<string, AppNotification>();
+    for (const item of [...directNotifs, ...roleNotifs]) {
+      byId.set(item.id, item);
+    }
+    const merged = Array.from(byId.values())
+      .sort((a, b) => b.criadoEm.localeCompare(a.criadoEm))
+      .slice(0, 50);
+    callbacks.onNotifications(merged);
+  };
+
+  const mapNotifDoc = (d: { id: string; data: () => Record<string, unknown> }): AppNotification => {
+    const data = d.data();
+    const readBy = Array.isArray(data.readBy) ? (data.readBy as string[]) : [];
+    const recipientRoles = Array.isArray(data.recipientRoles)
+      ? (data.recipientRoles as UserRole[])
+      : [];
+    return {
+      id: d.id,
+      title: String(data.title || ''),
+      message: String(data.message || ''),
+      date: String(data.date || ''),
+      read: readBy.includes(callbacks.uid),
+      recipientUid: String(data.recipientUid || ''),
+      recipientRoles,
+      readBy,
+      senderUid: String(data.senderUid || ''),
+      criadoEm: toIsoString(data.criadoEm),
+    };
+  };
+
+  const failNotif = (err: unknown) => {
+    console.warn('Falha ao escutar notificações no Firestore:', err);
+  };
+
+  unsubs.push(
+    onSnapshot(
+      query(collection(db, 'notificacoes'), where('recipientUid', '==', callbacks.uid)),
+      (snap) => {
+        directNotifs = snap.docs.map((d) => mapNotifDoc(d));
+        emitMergedNotifications();
+      },
+      failNotif
+    )
+  );
+
+  unsubs.push(
+    onSnapshot(
+      query(collection(db, 'notificacoes'), where('recipientRoles', 'array-contains', callbacks.role)),
+      (snap) => {
+        roleNotifs = snap.docs.map((d) => mapNotifDoc(d));
+        emitMergedNotifications();
+      },
+      failNotif
+    )
+  );
 
   return () => unsubs.forEach((u) => u());
 }

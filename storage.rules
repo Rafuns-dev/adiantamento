@@ -10,47 +10,21 @@ service firebase.storage {
       return request.auth != null;
     }
 
-    function temPerfil() {
-      return isSignedIn() &&
-        firestore.exists(/databases/(default)/documents/usuarios/$(request.auth.uid));
-    }
-
-    function perfil() {
-      return firestore.get(/databases/(default)/documents/usuarios/$(request.auth.uid)).data;
-    }
-
-    function ativo() {
-      return temPerfil() && perfil().ativo == true;
-    }
-
-    function eAdmin() {
-      return (ativo() && perfil().role in ['admin', 'financeiro']) ||
-        (isSignedIn() && request.auth.token.email == 'blabluki@gmail.com' && request.auth.token.email_verified == true);
-    }
-
-    function eNota() {
-      return ativo() && perfil().role == 'vistoria_nota';
-    }
-
-    function eComp() {
-      return ativo() && perfil().role == 'vistoria_ameta';
-    }
-
-    function interno() {
-      return eAdmin() || eNota() || eComp() || (ativo() && perfil().role == 'operador');
-    }
-
     function tamanhoValido() {
       return request.resource != null &&
         request.resource.size > 0 &&
-        request.resource.size <= 10 * 1024 * 1024; // Máximo 10 MB
+        request.resource.size <= 15 * 1024 * 1024; // Máximo 15 MB
     }
 
     function tipoNotaValido() {
       return request.resource.contentType in [
         'application/pdf',
         'application/xml',
-        'text/xml'
+        'text/xml',
+        'image/jpeg',
+        'image/jpg',
+        'image/png',
+        'image/webp'
       ];
     }
 
@@ -58,38 +32,36 @@ service firebase.storage {
       return request.resource.contentType in [
         'application/pdf',
         'image/jpeg',
-        'image/png'
+        'image/jpg',
+        'image/png',
+        'image/webp'
       ];
     }
 
     // Notas Fiscais: notas/{notaId}/{arquivo}
-    // Leitura: qualquer usuário ativo do painel (interno)
-    // Envio: apenas vistoria_nota e admin (PDF ou XML até 10 MB)
-    // Sem sobrescrever (update bloqueado) e sem apagar, exceto admin
+    // Obs.: o Firestore do app usa um banco nomeado (não "(default)"), portanto
+    // regras do Storage validam autenticação ativa, tipo e tamanho diretamente.
     match /notas/{notaId}/{fileName} {
-      allow read: if interno();
-      allow create: if (eNota() || eAdmin()) && tamanhoValido() && tipoNotaValido();
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && tamanhoValido() && tipoNotaValido();
       allow update: if false;
-      allow delete: if eAdmin();
+      allow delete: if isSignedIn();
     }
 
     // Comprovantes: comprovantes/{notaId}/{arquivo}
-    // Leitura: qualquer usuário ativo do painel (interno)
-    // Envio: apenas vistoria_ameta e admin (PDF, JPG ou PNG até 10 MB)
-    // Sem sobrescrever (update bloqueado) e sem apagar, exceto admin
     match /comprovantes/{notaId}/{fileName} {
-      allow read: if interno();
-      allow create: if (eComp() || eAdmin()) && tamanhoValido() && tipoComprovanteValido();
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && tamanhoValido() && tipoComprovanteValido();
       allow update: if false;
-      allow delete: if eAdmin();
+      allow delete: if isSignedIn();
     }
 
-    // Solicitações: solicitacoes/{requestId}/{fileName}
+    // Solicitações (NFs, comprovantes e recibos): solicitacoes/{requestId}/{fileName}
     match /solicitacoes/{requestId}/{fileName} {
-      allow read: if interno();
-      allow create: if interno() && tamanhoValido();
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && tamanhoValido();
       allow update: if false;
-      allow delete: if eAdmin();
+      allow delete: if isSignedIn();
     }
   }
 }

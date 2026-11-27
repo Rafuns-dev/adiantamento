@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { useApp } from '../../context/AppContext';
 import { CadastroPrestador, NotaFiscalEquipe, NotaEquipeStatus } from '../../types';
 import { DocumentViewerModal } from '../DocumentViewerModal';
+import { isImageFile, isPdfFile, isXmlFile } from '../../utils/fileHelpers';
 import {
   FileSpreadsheet,
   Search,
@@ -153,19 +154,13 @@ export const NotaFiscaisArea: React.FC = () => {
       setSelectedFile(null);
       return;
     }
-    const ext = file.name.toLowerCase();
-    const validType =
-      file.type === 'application/pdf' ||
-      file.type === 'application/xml' ||
-      file.type === 'text/xml' ||
-      ext.endsWith('.pdf') ||
-      ext.endsWith('.xml');
+    const validType = isPdfFile(file) || isXmlFile(file) || isImageFile(file);
     if (!validType) {
-      setFormError('Apenas arquivos PDF ou XML são permitidos nesta área.');
+      setFormError('Envie foto (JPG, PNG, WEBP), PDF ou XML da Nota Fiscal.');
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      setFormError('O arquivo excede o limite máximo de 10 MB.');
+    if (file.size > 15 * 1024 * 1024) {
+      setFormError('O arquivo excede o limite máximo de 15 MB.');
       return;
     }
     setSelectedFile(file);
@@ -677,13 +672,13 @@ export const NotaFiscaisArea: React.FC = () => {
 
               <div>
                 <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  Anexo Opcional da Nota (PDF ou XML, máx. 10 MB)
+                  Anexo Opcional da Nota (Foto, PDF ou XML, máx. 15 MB)
                 </label>
                 <div className="border-2 border-dashed border-indigo-200 bg-indigo-50/40 rounded-xl p-4 text-center">
                   <Upload className="w-6 h-6 text-indigo-600 mx-auto mb-1" />
                   <input
                     type="file"
-                    accept=".pdf,.xml"
+                    accept="image/*,.pdf,.xml"
                     onChange={handleFilePick}
                     className="w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
                   />

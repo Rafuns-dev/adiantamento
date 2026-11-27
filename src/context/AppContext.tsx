@@ -22,6 +22,8 @@ import {
   NotaFiscalEquipe,
   ComprovanteServico,
   AuditoriaEntry,
+  AppNotification,
+  UserRole,
 } from '../types';
 import { auth, googleProvider, getProvisioningAuth } from '../firebase';
 import {
@@ -30,10 +32,12 @@ import {
   criarCadastroPublicoFirestore,
   criarComprovanteFirestore,
   criarNotaFirestore,
+  criarNotificacaoFirestore,
   excluirComprovanteFirestore,
   excluirNotaFirestore,
   fetchUserProfileFirestore,
   getAuthenticatedDownloadUrl,
+  marcarNotificacaoLidaFirestore,
   markFirstLoginDoneFirestore,
   registrarAuditoriaFirestore,
   subscribeTeamCollections,
@@ -42,6 +46,7 @@ import {
   upsertRequestFirestore,
   upsertUserFirestore,
 } from '../services/firebaseService';
+import { prepareUploadFile } from '../utils/fileHelpers';
 
 /** E-mail do administrador inicial (precisa coincidir com o das regras do Firestore/Storage). */
 const BOOTSTRAP_ADMIN_EMAIL = 'blabluki@gmail.com';
@@ -83,10 +88,10 @@ interface AppContextType {
   rejectRequest: (id: string, reason: string) => void;
   returnRequestForAdjustment: (id: string, reason: string) => void;
   authorizeInvoice: (id: string, observation: string) => void;
-  submitInvoice: (id: string, invoice: Omit<InvoiceData, 'status'>) => void;
+  submitInvoice: (id: string, invoice: Omit<InvoiceData, 'status'>) => Promise<boolean>;
   reviewInvoice: (id: string, approved: boolean, comment?: string) => void;
-  registerPayment: (id: string, payment: PaymentData) => void;
-  submitAccountability: (id: string, expenses: ExpenseItem[]) => void;
+  registerPayment: (id: string, payment: PaymentData) => Promise<boolean>;
+  submitAccountability: (id: string, expenses: ExpenseItem[]) => Promise<boolean>;
   reviewAccountabilityExpense: (
     requestId: string,
     expenseId: string,
@@ -164,9 +169,10 @@ interface AppContextType {
   ) => Promise<void>;
   resolveAuthenticatedStorageUrl: (arquivoPath?: string) => Promise<string | null>;
 
-  // Notifications (apenas em memória: avisos da sessão atual)
-  notifications: Array<{ id: string; title: string; message: string; date: string; read: boolean }>;
+  // Notifications (direcionadas apenas ao usuário ou perfil destinatário)
+  notifications: AppNotification[];
   markNotificationAsRead: (id: string) => void;
+  markAllNotificationsAsRead: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -243,9 +249,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [notifications, setNotifications] = useState<
-    Array<{ id: string; title: string; message: string; date: string; read: boolean }>
-  >([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
 
   const activeRole: 'operador' | 'financeiro' =
     currentUser?.role === 'operador' ? 'operador' : 'financeiro';
@@ -278,6 +282,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setNotasEquipe([]);
         setComprovantes([]);
         setAuditoria([]);
+        setNotifications([]);
         setAuthReady(true);
         return;
       }
@@ -318,6 +323,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         setCurrentUser(profile);
         unsubData = subscribeTeamCollections({
+          uid: profile.id,
           role: profile.role,
           onCadastros: setCadastros,
           onNotas: setNotasEquipe,
@@ -325,6 +331,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           onAuditoria: setAuditoria,
           onRequests: (items) => setRequests(items.map(normalizeRequest)),
           onUsers: setUsers,
+          onNotifications: setNotifications,
           onError: (name, err) =>
             reportError(`Não foi possível ler "${name}" do Firebase`, err),
         });
@@ -365,6 +372,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
+    setNotifications([]);
     signOut(auth).catch((err) => console.error('Erro ao sair:', err));
   };
 
@@ -382,7 +390,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       throw new Error(errorText(err));
     }
     setCurrentUser({ ...currentUser, isFirstLogin: false });
-    addNotification('Senha Alterada', 'Sua senha foi alterada com sucesso.');
+    addNotification('Senha Alterada', 'Sua senha foi alterada com sucesso.', {
+      recipientUid: currentUser.id,
+    });
   };
 
   const sendPasswordReset = async (email: string): Promise<void> => {
@@ -394,19 +404,83 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // ==================== NOTIFICAÇÕES / AUDITORIA ====================
-  const addNotification = (title: string, message: string) => {
-    const newNotif = {
-      id: 'notif-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5),
+  type NotificationTarget =
+    | { recipientUid: string; recipientRoles?: never }
+    | { recipientRoles: UserRole[]; recipientUid?: never };
+
+  const addNotification = (title: string, message: string, target: NotificationTarget) => {
+    if (!currentUser) return;
+    const id = 'notif-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    const date = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const recipientUid = target.recipientUid ?? '';
+    const recipientRoles = target.recipientRoles ?? [];
+    const isForCurrentUser =
+      (recipientUid && recipientUid === currentUser.id) ||
+      recipientRoles.includes(currentUser.role);
+
+    if (isForCurrentUser) {
+      const newNotif: AppNotification = {
+        id,
+        title,
+        message,
+        date,
+        read: false,
+        recipientUid,
+        recipientRoles,
+        readBy: [],
+        senderUid: currentUser.id,
+        criadoEm: new Date().toISOString(),
+      };
+      setNotifications((prev) => (prev.some((n) => n.id === id) ? prev : [newNotif, ...prev]));
+    }
+
+    void criarNotificacaoFirestore({
+      id,
       title,
       message,
-      date: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      read: false,
-    };
-    setNotifications((prev) => [newNotif, ...prev]);
+      date,
+      recipientUid,
+      recipientRoles,
+      senderUid: currentUser.id,
+    }).catch((err) => {
+      console.warn('Não foi possível salvar a notificação no Firestore:', err);
+    });
   };
 
   const markNotificationAsRead = (id: string) => {
-    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+    if (!currentUser) return;
+    setNotifications((prev) =>
+      prev.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              read: true,
+              readBy: n.readBy.includes(currentUser.id) ? n.readBy : [...n.readBy, currentUser.id],
+            }
+          : n
+      )
+    );
+    void marcarNotificacaoLidaFirestore(id, currentUser.id).catch((err) => {
+      console.warn('Não foi possível marcar notificação como lida no Firestore:', err);
+    });
+  };
+
+  const markAllNotificationsAsRead = () => {
+    if (!currentUser) return;
+    const unread = notifications.filter((n) => !n.read);
+    if (unread.length === 0) return;
+    setNotifications((prev) =>
+      prev.map((n) => ({
+        ...n,
+        read: true,
+        readBy: n.readBy.includes(currentUser.id) ? n.readBy : [...n.readBy, currentUser.id],
+      }))
+    );
+    unread.forEach((n) => {
+      void marcarNotificacaoLidaFirestore(n.id, currentUser.id).catch((err) => {
+        console.warn('Não foi possível marcar notificação como lida no Firestore:', err);
+      });
+    });
   };
 
   const appendAuditoria = async (
@@ -437,7 +511,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * envia os anexos ao Storage e salva o documento no Firestore.
    * Se algo falhar, o erro aparece no aviso vermelho do topo (syncError).
    */
-  const persistRequest = async (updated: AdvanceRequest): Promise<void> => {
+  const persistRequest = async (updated: AdvanceRequest): Promise<boolean> => {
     setRequests((prev) =>
       prev.some((r) => r.id === updated.id)
         ? prev.map((r) => (r.id === updated.id ? updated : r))
@@ -446,8 +520,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const withFiles = await uploadRequestFiles(updated);
       await upsertRequestFirestore(withFiles);
+      return true;
     } catch (err) {
       reportError('A alteração NÃO foi salva no Firebase', err);
+      return false;
     }
   };
 
@@ -527,7 +603,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ],
     };
     void persistRequest(newReq);
-    addNotification('Nova Solicitação', `Solicitação ${newCode} enviada para análise.`);
+    addNotification(
+      'Nova Solicitação',
+      `Solicitação ${newCode} de ${currentUser.name} enviada para análise.`,
+      { recipientRoles: ['admin', 'financeiro'] }
+    );
   };
 
   const approveRequest = (id: string, comment?: string, approvedAmount?: number) => {
@@ -564,10 +644,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addNotification(
       'Solicitação Aprovada',
       isAmeta
-        ? `A solicitação ${req.code} foi aprovada sem necessidade de Nota Fiscal, direcionada aos comprovantes para conferência.`
+        ? `Sua solicitação ${req.code} foi aprovada sem necessidade de Nota Fiscal e liberada para anexar comprovantes.`
         : validAmount
-        ? `A solicitação ${req.code} foi aprovada com valor de R$ ${validAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}.`
-        : `A solicitação ${req.code} foi aprovada.`
+        ? `Sua solicitação ${req.code} foi aprovada com valor de R$ ${validAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}.`
+        : `Sua solicitação ${req.code} foi aprovada.`,
+      { recipientUid: req.operatorId }
     );
   };
 
@@ -578,7 +659,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     void persistRequest(
       withHistory(req, 'Solicitação Rejeitada', { comment: reason, statusAfter: 'Rejeitado' })
     );
-    addNotification('Solicitação Rejeitada', `A solicitação ${req.code} foi rejeitada.`);
+    addNotification('Solicitação Rejeitada', `Sua solicitação ${req.code} foi rejeitada.`, {
+      recipientUid: req.operatorId,
+    });
   };
 
   const returnRequestForAdjustment = (id: string, reason: string) => {
@@ -591,7 +674,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         statusAfter: 'Aguardando ajustes',
       })
     );
-    addNotification('Ajustes Solicitados', `A solicitação ${req.code} precisa de ajustes.`);
+    addNotification('Ajustes Solicitados', `Sua solicitação ${req.code} precisa de ajustes.`, {
+      recipientUid: req.operatorId,
+    });
   };
 
   const authorizeInvoice = (id: string, observation: string) => {
@@ -605,25 +690,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         patch: { invoiceAuthorized: true, invoiceObservation: observation },
       })
     );
-    addNotification('NF Autorizada', `Emissão de Nota Fiscal autorizada para ${req.code}.`);
+    addNotification(
+      'NF Autorizada',
+      `Emissão de Nota Fiscal autorizada para sua solicitação ${req.code}.`,
+      { recipientUid: req.operatorId }
+    );
   };
 
-  const submitInvoice = (id: string, invoiceData: Omit<InvoiceData, 'status'>) => {
-    if (!currentUser) return;
+  const submitInvoice = async (
+    id: string,
+    invoiceData: Omit<InvoiceData, 'status'>
+  ): Promise<boolean> => {
+    if (!currentUser) return false;
     const req = requests.find((r) => r.id === id);
-    if (!req) return;
+    if (!req) return false;
     const fullInvoice: InvoiceData = { ...invoiceData, status: 'pendente' };
-    void persistRequest(
+    const ok = await persistRequest(
       withHistory(req, 'Nota Fiscal Enviada para Conferência', {
         comment: `NF nº ${invoiceData.number} enviada.`,
         statusAfter: 'Nota Fiscal em conferência',
         patch: { invoice: fullInvoice },
       })
     );
+    if (!ok) return false;
     addNotification(
       'NF Enviada',
-      `Nota Fiscal da solicitação ${req.code} enviada para conferência.`
+      `Nota Fiscal da solicitação ${req.code} (${req.operatorName}) enviada para conferência.`,
+      { recipientRoles: ['admin', 'financeiro'] }
     );
+    return true;
   };
 
   const reviewInvoice = (id: string, approved: boolean, comment?: string) => {
@@ -654,28 +749,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     addNotification(
       approved ? 'NF Aprovada' : 'NF Devolvida',
-      `Nota Fiscal de ${req.code} foi ${approved ? 'aprovada' : 'devolvida'}.`
+      `A Nota Fiscal da sua solicitação ${req.code} foi ${approved ? 'aprovada' : 'devolvida para correção'}.`,
+      { recipientUid: req.operatorId }
     );
   };
 
-  const registerPayment = (id: string, paymentData: PaymentData) => {
-    if (!currentUser) return;
+  const registerPayment = async (id: string, paymentData: PaymentData): Promise<boolean> => {
+    if (!currentUser) return false;
     const req = requests.find((r) => r.id === id);
-    if (!req) return;
-    void persistRequest(
+    if (!req) return false;
+    const ok = await persistRequest(
       withHistory(req, 'Pagamento Registrado', {
         comment: `Valor de R$ ${paymentData.amountPaid.toFixed(2)} pago via ${paymentData.method}.`,
         statusAfter: 'Pago',
         patch: { payment: paymentData },
       })
     );
-    addNotification('Pagamento Efetuado', `Pagamento da solicitação ${req.code} registrado.`);
+    if (!ok) return false;
+    addNotification('Pagamento Efetuado', `Pagamento da sua solicitação ${req.code} registrado.`, {
+      recipientUid: req.operatorId,
+    });
+    return true;
   };
 
-  const submitAccountability = (id: string, expenses: ExpenseItem[]) => {
-    if (!currentUser) return;
+  const submitAccountability = async (id: string, expenses: ExpenseItem[]): Promise<boolean> => {
+    if (!currentUser) return false;
     const req = requests.find((r) => r.id === id);
-    if (!req) return;
+    if (!req) return false;
     const totalExpenses = expenses.reduce((acc, item) => acc + item.amount, 0);
     const diff = req.amountRequested - totalExpenses;
     let balanceType: 'saldo_a_devolver' | 'excedente' | 'zerado' = 'zerado';
@@ -695,17 +795,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       reimbursementStatus: balanceType === 'excedente' ? ('pendente' as const) : undefined,
     };
 
-    void persistRequest(
+    const ok = await persistRequest(
       withHistory(req, 'Prestação de Contas Enviada', {
         comment: `Total de despesas: R$ ${totalExpenses.toFixed(2)}.`,
         statusAfter: 'Prestação em análise',
         patch: { accountability: accountabilityData },
       })
     );
+    if (!ok) return false;
     addNotification(
       'Prestação Enviada',
-      `Prestação de contas de ${req.code} enviada para análise.`
+      `Prestação de contas de ${req.code} (${req.operatorName}) enviada para análise.`,
+      { recipientRoles: ['admin', 'financeiro'] }
     );
+    return true;
   };
 
   const reviewAccountabilityExpense = (
@@ -751,7 +854,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         statusAfter: 'Finalizado',
       })
     );
-    addNotification('Atividade Finalizada', `A solicitação ${req.code} foi finalizada com sucesso.`);
+    addNotification(
+      'Atividade Finalizada',
+      `A solicitação ${req.code} (${req.operatorName}) foi finalizada com sucesso.`,
+      currentUser.id === req.operatorId
+        ? { recipientRoles: ['admin', 'financeiro'] }
+        : { recipientUid: req.operatorId }
+    );
   };
 
   const reviewAccountability = (id: string, approved: boolean, comment?: string) => {
@@ -777,7 +886,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     addNotification(
       'Prestação Analisada',
-      `Prestação de ${req.code} foi ${approved ? 'aprovada' : 'devolvida'}.`
+      `Sua prestação de contas de ${req.code} foi ${approved ? 'aprovada' : 'devolvida para ajustes'}.`,
+      { recipientUid: req.operatorId }
     );
   };
 
@@ -794,7 +904,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     addNotification(
       'Devolução Registrada',
-      `Devolução de saldo para ${req.code} registrada e processo finalizado.`
+      `Devolução de saldo para ${req.code} registrada e processo finalizado.`,
+      currentUser.id === req.operatorId
+        ? { recipientRoles: ['admin', 'financeiro'] }
+        : { recipientUid: req.operatorId }
     );
   };
 
@@ -809,7 +922,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         patch: { accountability: { ...req.accountability, reimbursementStatus: 'aprovado' } },
       })
     );
-    addNotification('Reembolso Aprovado', `Reembolso excedente para ${req.code} aprovado.`);
+    addNotification(
+      'Reembolso Aprovado',
+      `Reembolso excedente para sua solicitação ${req.code} aprovado.`,
+      { recipientUid: req.operatorId }
+    );
   };
 
   const finalizeAccountability = (id: string) => {
@@ -822,7 +939,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         statusAfter: 'Finalizado',
       })
     );
-    addNotification('Processo Finalizado', `Solicitação ${req.code} totalmente finalizada.`);
+    addNotification(
+      'Processo Finalizado',
+      `Sua solicitação ${req.code} foi totalmente finalizada.`,
+      { recipientUid: req.operatorId }
+    );
   };
 
   // ==================== USUÁRIOS ====================
@@ -868,12 +989,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         `A conta de login foi criada, mas o perfil não foi salvo no Firestore: ${errorText(err)}`
       );
     }
-    addNotification(
-      'Usuário Cadastrado',
-      customPass
-        ? `Novo usuário ${newUser.name} cadastrado com senha personalizada.`
-        : `Novo usuário ${newUser.name} cadastrado com senha padrão '${DEFAULT_PASSWORD}'.`
-    );
+    if (currentUser) {
+      addNotification(
+        'Usuário Cadastrado',
+        customPass
+          ? `Novo usuário ${newUser.name} cadastrado com senha personalizada.`
+          : `Novo usuário ${newUser.name} cadastrado com senha padrão '${DEFAULT_PASSWORD}'.`,
+        { recipientUid: currentUser.id }
+      );
+    }
   };
 
   const updateUser = async (
@@ -891,7 +1015,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (err) {
       throw new Error(errorText(err));
     }
-    addNotification('Usuário Atualizado', 'Dados e perfil de acesso atualizados com sucesso.');
+    if (currentUser) {
+      addNotification('Usuário Atualizado', 'Dados e perfil de acesso atualizados com sucesso.', {
+        recipientUid: currentUser.id,
+      });
+    }
   };
 
   const toggleUserStatus = async (userId: string): Promise<void> => {
@@ -920,10 +1048,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         'Não foi possível enviar o cadastro agora. Confira os dados e tente novamente.'
       );
     }
-    addNotification(
-      'Novo Cadastro de Prestador',
-      `${campos16.nome} (${campos16.empresa}) enviou o formulário público.`
-    );
+    if (currentUser) {
+      addNotification(
+        'Novo Cadastro de Prestador',
+        `${campos16.nome} (${campos16.empresa}) enviou o formulário público.`,
+        { recipientRoles: ['admin', 'financeiro'] }
+      );
+    }
     return {
       ...campos16,
       id,
@@ -951,7 +1082,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cadastroId,
       `Cadastro de ${alvo?.nome || cadastroId} marcado como Concluído por ${currentUser.name}`
     );
-    addNotification('Cadastro Concluído', `Cadastro de ${alvo?.nome || ''} foi concluído.`);
+    addNotification('Cadastro Concluído', `Cadastro de ${alvo?.nome || ''} foi concluído.`, {
+      recipientUid: currentUser.id,
+    });
   };
 
   const createNotaEquipe = async (
@@ -976,7 +1109,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (file) {
       try {
-        const up = await uploadAuthenticatedFile('notas', notaId, file, onProgress);
+        const prepared = await prepareUploadFile(file, 1400, 0.78);
+        const up = await uploadAuthenticatedFile('notas', notaId, prepared.file, onProgress);
         arquivoPath = up.arquivoPath;
         arquivoNome = up.arquivoNome;
       } catch (err) {
@@ -1021,7 +1155,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     addNotification(
       'Nota Fiscal Registrada',
-      `Nota ${novaNota.numero} registrada para ${prestador.nome}.`
+      `Nota ${novaNota.numero} registrada para ${prestador.nome}.`,
+      { recipientRoles: ['admin', 'financeiro'] }
     );
     return novaNota;
   };
@@ -1052,7 +1187,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (file) {
       try {
-        const up = await uploadAuthenticatedFile('notas', notaId, file, onProgress);
+        const prepared = await prepareUploadFile(file, 1400, 0.78);
+        const up = await uploadAuthenticatedFile('notas', notaId, prepared.file, onProgress);
         arquivoPath = up.arquivoPath;
         arquivoNome = up.arquivoNome;
       } catch (err) {
@@ -1072,7 +1208,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notaId,
       `Nota ${updates.numero} atualizada por ${currentUser.name}`
     );
-    addNotification('Nota Atualizada', `Nota ${updates.numero} atualizada com sucesso.`);
+    addNotification(
+      'Nota Atualizada',
+      `Nota ${updates.numero} atualizada com sucesso.`,
+      isAdmin ? { recipientUid: existing.criadoPorUid } : { recipientRoles: ['admin', 'financeiro'] }
+    );
   };
 
   const releaseNotaForComprovante = async (notaId: string) => {
@@ -1109,7 +1249,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     addNotification(
       'Liberada para Comprovantes',
-      `Nota ${existing.numero} agora aguarda comprovante da Equipe Ameta.`
+      `Nota ${existing.numero} (${existing.prestadorNome}) agora aguarda comprovante.`,
+      { recipientRoles: ['vistoria_ameta'] }
     );
   };
 
@@ -1151,18 +1292,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const compId = 'comp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
     const folderId = nota ? nota.id : req?.id || 'geral';
 
+    const prepared = await prepareUploadFile(file, 1280, 0.74);
+    const uploadTargetFile = prepared.file;
+    const validMime: ComprovanteServico['tipo'] =
+      uploadTargetFile.type === 'image/jpeg' || uploadTargetFile.type === 'image/png'
+        ? uploadTargetFile.type
+        : 'application/pdf';
+
     let arquivoPath = '';
     let arquivoNome = file.name;
+    let arquivoData: string | undefined;
+
     try {
-      const up = await uploadAuthenticatedFile('comprovantes', folderId, file, onProgress);
+      const up = await uploadAuthenticatedFile('comprovantes', folderId, uploadTargetFile, onProgress);
       arquivoPath = up.arquivoPath;
       arquivoNome = up.arquivoNome;
-    } catch (err) {
-      throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(err)}`);
+    } catch (storageErr) {
+      if (prepared.dataUrl && prepared.dataUrl.length <= 780_000) {
+        console.warn('Storage indisponível; salvando comprovante comprimido no Firestore:', storageErr);
+        arquivoPath = `inline/${compId}`;
+        arquivoData = prepared.dataUrl;
+        onProgress?.(100);
+      } else {
+        throw new Error(`Falha ao enviar o arquivo para o Storage: ${errorText(storageErr)}`);
+      }
     }
-
-    const validMime: ComprovanteServico['tipo'] =
-      file.type === 'image/jpeg' || file.type === 'image/png' ? file.type : 'application/pdf';
 
     const novoComp: ComprovanteServico = {
       id: compId,
@@ -1176,8 +1330,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       data: data.data,
       arquivoPath,
       arquivoNome,
+      arquivoData,
       tipo: validMime,
-      tamanho: file.size,
+      tamanho: uploadTargetFile.size,
       criadoPorUid: currentUser.id,
       criadoPorNome: currentUser.name,
       criadoEm: new Date().toISOString(),
@@ -1204,7 +1359,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `Comprovante ${arquivoNome} anexado a ${nota ? `nota ${nota.numero}` : `solicitação ${req?.code}`}`
     );
 
-    addNotification('Comprovante Enviado', `Comprovante ${arquivoNome} anexado com sucesso.`);
+    addNotification(
+      'Comprovante Enviado',
+      `Comprovante ${arquivoNome} anexado a ${nota ? `nota ${nota.numero}` : `solicitação ${req?.code}`}.`,
+      nota
+        ? { recipientRoles: ['admin', 'financeiro', 'vistoria_nota'] }
+        : { recipientRoles: ['admin', 'financeiro'] }
+    );
     return novoComp;
   };
 
@@ -1292,6 +1453,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resolveAuthenticatedStorageUrl,
         notifications,
         markNotificationAsRead,
+        markAllNotificationsAsRead,
       }}
     >
       {children}

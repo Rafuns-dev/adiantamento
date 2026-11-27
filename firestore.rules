@@ -178,6 +178,31 @@ service cloud.firestore {
         data.criadoEm == request.time;
     }
 
+    function isValidNotificacao(data) {
+      return data.keys().hasAll([
+          'title', 'message', 'date', 'recipientUid', 'recipientRoles', 'readBy', 'senderUid', 'criadoEm'
+        ]) &&
+        data.keys().hasOnly([
+          'title', 'message', 'date', 'recipientUid', 'recipientRoles', 'readBy', 'senderUid', 'criadoEm'
+        ]) &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+        data.message is string && data.message.size() >= 2 && data.message.size() <= 500 &&
+        data.date is string && data.date.size() >= 8 && data.date.size() <= 40 &&
+        data.recipientUid is string && data.recipientUid.size() <= 128 &&
+        data.recipientRoles is list && data.recipientRoles.size() <= 5 &&
+        data.recipientRoles.hasOnly(['admin', 'operador', 'financeiro', 'vistoria_nota', 'vistoria_ameta']) &&
+        (data.recipientUid.size() > 0 || data.recipientRoles.size() > 0) &&
+        data.readBy is list && data.readBy.size() <= 50 &&
+        (data.readBy.size() == 0 || data.readBy[0] is string) &&
+        data.senderUid is string && data.senderUid.size() >= 1 && data.senderUid.size() <= 128;
+    }
+
+    function isNotifRecipient(data) {
+      return data.recipientUid == request.auth.uid ||
+        (ativo() && perfil().role in data.recipientRoles) ||
+        (isSignedIn() && request.auth.token.email == 'blabluki@gmail.com' && request.auth.token.email_verified == true && 'admin' in data.recipientRoles);
+    }
+
     // ==================== COLEÇÕES ====================
 
     match /usuarios/{uid} {
@@ -259,6 +284,30 @@ service cloud.firestore {
       allow create: if isValidId(id) && interno() && isValidAuditoria(incoming());
       allow update: if false;
       allow delete: if false;
+    }
+
+    match /notificacoes/{id} {
+      allow get: if isValidId(id) && interno() && isNotifRecipient(existing());
+      allow list: if interno() && isNotifRecipient(resource.data);
+      allow create: if isValidId(id) && interno() &&
+        isValidNotificacao(incoming()) &&
+        incoming().senderUid == request.auth.uid &&
+        incoming().readBy.size() == 0 &&
+        incoming().criadoEm == request.time;
+      allow update: if isValidId(id) && interno() && isNotifRecipient(existing()) &&
+        isValidNotificacao(incoming()) &&
+        incoming().title == existing().title &&
+        incoming().message == existing().message &&
+        incoming().date == existing().date &&
+        incoming().recipientUid == existing().recipientUid &&
+        incoming().recipientRoles == existing().recipientRoles &&
+        incoming().senderUid == existing().senderUid &&
+        incoming().criadoEm == existing().criadoEm &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['readBy']) &&
+        incoming().readBy.hasAll(existing().readBy) &&
+        incoming().readBy.size() <= existing().readBy.size() + 1 &&
+        request.auth.uid in incoming().readBy;
+      allow delete: if isValidId(id) && admin();
     }
 
     match /test/{docId} {

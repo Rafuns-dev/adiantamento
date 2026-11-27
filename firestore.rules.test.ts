@@ -437,4 +437,38 @@ describe('AMETA - Regras de Segurança Firestore e Storage (Emulator)', () => {
       })
     );
   });
+
+  it('8. Notificações só podem ser lidas e marcadas como lidas pelos destinatários.', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'notificacoes', 'notif-user-only'), {
+        title: 'Solicitação Aprovada',
+        message: 'Sua solicitação foi aprovada.',
+        date: '2026-11-27 10:00',
+        recipientUid: 'uid-ameta',
+        recipientRoles: [],
+        readBy: [],
+        senderUid: 'uid-admin',
+        criadoEm: serverTimestamp(),
+      });
+    });
+
+    const ametaCtx = testEnv.authenticatedContext('uid-ameta');
+    const notaCtx = testEnv.authenticatedContext('uid-nota-1');
+
+    // Destinatário lê e marca como lida: PERMITIDO
+    await assertSucceeds(getDoc(doc(ametaCtx.firestore(), 'notificacoes', 'notif-user-only')));
+    await assertSucceeds(
+      updateDoc(doc(ametaCtx.firestore(), 'notificacoes', 'notif-user-only'), {
+        readBy: ['uid-ameta'],
+      })
+    );
+
+    // Outro perfil/usuário tentando ler ou marcar como lida: NEGADO
+    await assertFails(getDoc(doc(notaCtx.firestore(), 'notificacoes', 'notif-user-only')));
+    await assertFails(
+      updateDoc(doc(notaCtx.firestore(), 'notificacoes', 'notif-user-only'), {
+        readBy: ['uid-ameta', 'uid-nota-1'],
+      })
+    );
+  });
 });

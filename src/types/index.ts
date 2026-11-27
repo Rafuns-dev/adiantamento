@@ -145,6 +145,8 @@ export interface InvoiceData {
   cnpj: string;
   emissionDate: string;
   amount: number;
+  paymentPreference?: 'PIX' | 'Depósito';
+  paymentDetails?: string;
   pdfUrl?: string;
   pdfData?: string;
   xmlUrl?: string;
@@ -213,3 +215,17 @@ export interface AdvanceRequest {
   accountability?: AccountabilityData;
   history: AuditLogEntry[];
 }
+
+export interface AppNotification {
+  id: string;
+  title: string;
+  message: string;
+  date: string;
+  read: boolean;
+  recipientUid: string;
+  recipientRoles: UserRole[];
+  readBy: string[];
+  senderUid: string;
+  criadoEm: string;
+}
+

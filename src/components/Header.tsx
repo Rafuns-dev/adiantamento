@@ -10,7 +10,8 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ onOpenMobileMenu }) => {
-  const { currentUser, logout, notifications, markNotificationAsRead } = useApp();
+  const { currentUser, logout, notifications, markNotificationAsRead, markAllNotificationsAsRead } =
+    useApp();
   const [showNotifications, setShowNotifications] = useState(false);
 
   if (!currentUser) return null;
@@ -71,11 +72,22 @@ export const Header: React.FC<HeaderProps> = ({ onOpenMobileMenu }) => {
 
           {showNotifications && (
             <div className="fixed left-3 right-3 top-[4.25rem] sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 py-3 z-50">
-              <div className="px-4 pb-2 border-b border-slate-100 flex items-center justify-between">
+              <div className="px-4 pb-2 border-b border-slate-100 flex items-center justify-between gap-2">
                 <h4 className="font-bold text-slate-900 text-sm">Notificações</h4>
-                <span className="text-xs bg-teal-100 text-teal-800 font-semibold px-2 py-0.5 rounded-md tabular-nums">
-                  {unreadCount} novas
-                </span>
+                <div className="flex items-center gap-2">
+                  {unreadCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={markAllNotificationsAsRead}
+                      className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 underline"
+                    >
+                      Marcar lidas
+                    </button>
+                  )}
+                  <span className="text-xs bg-teal-100 text-teal-800 font-semibold px-2 py-0.5 rounded-md tabular-nums">
+                    {unreadCount} novas
+                  </span>
+                </div>
               </div>
               <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
                 {notifications.length === 0 ? (
