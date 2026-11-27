@@ -104,7 +104,9 @@ interface AppContextType {
   finalizeActivity: (requestId: string) => void;
 
   // User Management
-  addUser: (userData: Omit<User, 'id' | 'createdAt' | 'active'>) => Promise<void>;
+  addUser: (
+    userData: Omit<User, 'id' | 'createdAt' | 'active'> & { sendPasswordEmail?: boolean }
+  ) => Promise<{ emailSent: boolean; emailError?: string }>;
   updateUser: (
     userId: string,
     updates: Partial<
@@ -946,21 +948,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // ==================== USUÁRIOS ====================
-  const addUser = async (userData: Omit<User, 'id' | 'createdAt' | 'active'>): Promise<void> => {
+  const addUser = async (
+    userData: Omit<User, 'id' | 'createdAt' | 'active'> & { sendPasswordEmail?: boolean }
+  ): Promise<{ emailSent: boolean; emailError?: string }> => {
+    const cleanEmail = userData.email.trim();
+    const sendPasswordEmail = Boolean(userData.sendPasswordEmail);
     const customPass = userData.password?.trim();
-    const password = customPass || DEFAULT_PASSWORD;
-    if (password.length < 6) throw new Error('A senha deve ter pelo menos 6 caracteres.');
+    const randomTempPass = `Am#${Math.random().toString(36).slice(2)}A9!${Date.now().toString(36)}`;
+    const password = sendPasswordEmail ? randomTempPass : customPass || DEFAULT_PASSWORD;
+    if (!sendPasswordEmail && password.length < 6) {
+      throw new Error('A senha deve ter pelo menos 6 caracteres.');
+    }
 
     // 1) cria a conta de login no Firebase Authentication (numa instância separada,
     //    para o administrador não ser deslogado)
     const provisioningAuth = getProvisioningAuth();
     let uid: string;
     try {
-      const cred = await createUserWithEmailAndPassword(
-        provisioningAuth,
-        userData.email.trim(),
-        password
-      );
+      const cred = await createUserWithEmailAndPassword(provisioningAuth, cleanEmail, password);
       uid = cred.user.uid;
     } catch (err) {
       throw new Error(friendlyAuthError(err));
@@ -972,14 +977,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newUser: User = {
       id: uid,
       name: userData.name,
-      email: userData.email.trim(),
+      email: cleanEmail,
       cpfCnpj: userData.cpfCnpj || '',
       phone: userData.phone || '',
       role: userData.role,
       active: true,
       ativo: true,
       createdAt: new Date().toISOString().substring(0, 10),
-      isFirstLogin: !customPass,
+      isFirstLogin: sendPasswordEmail ? false : !customPass,
     };
     try {
       await upsertUserFirestore(newUser);
@@ -988,15 +993,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         `A conta de login foi criada, mas o perfil não foi salvo no Firestore: ${errorText(err)}`
       );
     }
+
+    let emailSent = false;
+    let emailError: string | undefined;
+    if (sendPasswordEmail) {
+      try {
+        await sendPasswordResetEmail(auth, cleanEmail);
+        emailSent = true;
+      } catch (err) {
+        emailError = friendlyAuthError(err);
+      }
+    }
+
     if (currentUser) {
       addNotification(
         'Usuário Cadastrado',
-        customPass
-          ? `Novo usuário ${newUser.name} cadastrado com senha personalizada.`
-          : `Novo usuário ${newUser.name} cadastrado com senha padrão '${DEFAULT_PASSWORD}'.`,
+        sendPasswordEmail
+          ? emailSent
+            ? `Novo usuário ${newUser.name} cadastrado. E-mail enviado para definição de senha.`
+            : `Novo usuário ${newUser.name} cadastrado, mas falhou o envio do e-mail de senha.`
+          : customPass
+            ? `Novo usuário ${newUser.name} cadastrado com senha personalizada.`
+            : `Novo usuário ${newUser.name} cadastrado com senha padrão '${DEFAULT_PASSWORD}'.`,
         { recipientUid: currentUser.id }
       );
     }
+
+    return { emailSent, emailError };
   };
 
   const updateUser = async (

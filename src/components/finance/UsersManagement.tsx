@@ -14,6 +14,7 @@ export const UsersManagement: React.FC = () => {
   const [cpfCnpj, setCpfCnpj] = useState('');
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<UserRole>('operador');
+  const [passwordMode, setPasswordMode] = useState<'email' | 'manual'>('email');
   const [password, setPassword] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -42,6 +43,7 @@ export const UsersManagement: React.FC = () => {
     setCpfCnpj('');
     setPhone('');
     setRole('operador');
+    setPasswordMode('email');
     setPassword('');
     setErrorMsg('');
     setModalOpen(true);
@@ -73,22 +75,34 @@ export const UsersManagement: React.FC = () => {
         await updateUser(editingUser.id, { name, cpfCnpj, phone, role });
         setSuccessMsg(`Usuário ${name} atualizado com sucesso!`);
       } else {
-        await addUser({
+        const result = await addUser({
           name,
           email,
           cpfCnpj,
           phone,
           role,
-          ...(cleanPass ? { password: cleanPass } : {}),
+          ...(passwordMode === 'email'
+            ? { sendPasswordEmail: true }
+            : cleanPass
+              ? { password: cleanPass }
+              : {}),
         });
-        setSuccessMsg(
-          cleanPass
-            ? `Usuário ${name} cadastrado com senha definida!`
-            : `Usuário ${name} cadastrado com senha padrão 'ameta123'!`
-        );
+        if (passwordMode === 'email') {
+          setSuccessMsg(
+            result.emailSent
+              ? `Usuário ${name} cadastrado! Enviamos um e-mail para ${email.trim()} para a pessoa escolher a própria senha.`
+              : `Usuário ${name} cadastrado, mas não foi possível enviar o e-mail automático (${result.emailError || 'use Editar para reenviar'}).`
+          );
+        } else {
+          setSuccessMsg(
+            cleanPass
+              ? `Usuário ${name} cadastrado com senha definida!`
+              : `Usuário ${name} cadastrado com senha padrão 'ameta123'!`
+          );
+        }
       }
       setModalOpen(false);
-      setTimeout(() => setSuccessMsg(''), 3000);
+      setTimeout(() => setSuccessMsg(''), 6000);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Não foi possível salvar o usuário.');
     } finally {
@@ -333,30 +347,85 @@ export const UsersManagement: React.FC = () => {
                   </button>
                 </div>
               ) : (
-                <div>
-                  <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
-                    Senha de Acesso (opcional)
-                  </label>
-                  <input
-                    type="password"
-                    placeholder="Deixe em branco para usar a padrão 'ameta123'"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl"
-                  />
+                <div className="space-y-3">
+                  <div>
+                    <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                      Definição da Senha de Acesso
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPasswordMode('email')}
+                        className={`p-3 rounded-xl border text-left transition-colors ${
+                          passwordMode === 'email'
+                            ? 'border-teal-600 bg-teal-50/70 text-teal-900'
+                            : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        <span className="font-bold flex items-center gap-1.5">
+                          <Mail className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                          Enviar por e-mail
+                        </span>
+                        <span className="block text-[11px] text-slate-500 mt-0.5">
+                          A pessoa escolhe a própria senha pelo link no e-mail.
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setPasswordMode('manual')}
+                        className={`p-3 rounded-xl border text-left transition-colors ${
+                          passwordMode === 'manual'
+                            ? 'border-teal-600 bg-teal-50/70 text-teal-900'
+                            : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        <span className="font-bold block">Definir senha agora</span>
+                        <span className="block text-[11px] text-slate-500 mt-0.5">
+                          Informar senha manualmente ou usar padrão.
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {passwordMode === 'email' ? (
+                    <div className="text-[11px] text-teal-800 bg-teal-50 p-3 rounded-xl border border-teal-200 flex items-start gap-2">
+                      <Mail className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />
+                      <span>
+                        Ao cadastrar, será enviado um e-mail para{' '}
+                        <strong>{email.trim() || 'o endereço informado acima'}</strong> com o link
+                        para a pessoa criar sua própria senha de acesso.
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="block font-bold uppercase tracking-wider text-slate-700 mb-1">
+                          Senha de Acesso (opcional)
+                        </label>
+                        <input
+                          type="password"
+                          placeholder="Deixe em branco para usar a padrão 'ameta123'"
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl"
+                        />
+                      </div>
+
+                      {!password.trim() && (
+                        <p className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                          Se deixado em branco, o usuário receberá a senha padrão{' '}
+                          <strong>ameta123</strong> e deverá alterá-la no primeiro login.
+                        </p>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
 
               {errorMsg && (
                 <p className="text-[12px] font-semibold text-red-700 bg-red-50 p-2.5 rounded-xl border border-red-200">
                   {errorMsg}
-                </p>
-              )}
-
-              {!editingUser && !password.trim() && (
-                <p className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                  Se deixado em branco, o usuário receberá a senha padrão <strong>ameta123</strong> e
-                  deverá alterá-la no primeiro login.
                 </p>
               )}
 
